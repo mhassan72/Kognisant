@@ -1,0 +1,979 @@
+import json
+import os
+import re
+import sys
+import threading
+import time
+
+from .colors import Colors, Spinner
+from .config import GLOBAL_CORE_DIR, load_spec_info
+from .network import query_model_api, query_model_api_raw
+from .tools import execute_tool, load_global_tools
+
+# Device Capability Awareness: Cap local concurrency based on CPU counts to prevent system freezes
+CPU_COUNT = os.cpu_count() or 4
+MAX_LOCAL_CONCURRENCY = max(1, CPU_COUNT // 4)
+local_semaphore = threading.Semaphore(MAX_LOCAL_CONCURRENCY)
+
+print_lock = threading.Lock()
+
+
+class SwarmController:
+    """Thread-safe global state manager for pause, resume, stop, and status control of background swarms."""
+
+    is_active = False
+    is_paused = False
+    stop_event = threading.Event()
+    resume_event = threading.Event()
+    active_task_description = ""
+
+    # Initialize state
+    resume_event.set()
+
+
+def get_best_models_pool(compiled_models):
+    """Identifies the best models in the pool for planning and tasks."""
+    planning_model = None
+    task_model = None
+
+    # Sort models: Cloud models are prioritized for planning, local/mini for tasks
+    for model in compiled_models:
+        provider = model.get("provider", "")
+        name = model.get("name", "").lower()
+        api_key = model.get("api_key", "")
+
+        # A cloud model with a valid configured API key is perfect for planning
+        if provider != "Ollama (Local)" and api_key and "your-" not in api_key:
+            if "gpt-4" in name or "chat" in name or "kimi" in name:
+                planning_model = model
+            elif not task_model:
+                task_model = model
+
+        # Local model is fine as fallback task model
+        if provider == "Ollama (Local)" and not task_model:
+            task_model = model
+
+    # Fallbacks if pool is unconfigured or empty
+    if not planning_model:
+        planning_model = (
+            compiled_models[0]
+            if compiled_models
+            else {"name": "mock", "provider": "Offline"}
+        )
+    if not task_model:
+        task_model = (
+            compiled_models[0]
+            if compiled_models
+            else {"name": "mock", "provider": "Offline"}
+        )
+
+    return planning_model, task_model
+
+
+def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_id):
+    """Executes a single subtask on a background thread utilizing the appropriate model and semaphore."""
+    # 1. Early abort check
+    if SwarmController.stop_event.is_set():
+        return
+
+    # 2. Asynchronous Pause check (wait here if paused)
+    SwarmController.resume_event.wait()
+
+    provider = task_model.get("provider", "")
+    is_local = provider == "Ollama (Local)"
+
+    # Throttling: If local, acquire semaphore to prevent local GPU/CPU overload
+    if is_local:
+        local_semaphore.acquire()
+
+    try:
+        # Format a highly descriptive, concise, and friendly subtask name
+        desc = subtask.get("description", "Perform codebase task").strip()
+        desc_display = desc if len(desc) < 65 else desc[:62] + "..."
+
+        # Re-check stop event
+        if SwarmController.stop_event.is_set():
+            return
+
+        with print_lock:
+            print(
+                f"  🚀 {Colors.CYAN}Agent [{subtask_id}] Booted:{Colors.RESET} {Colors.BOLD}{desc_display}{Colors.RESET} using '{task_model['name']}'..."
+            )
+            sys.stdout.flush()
+
+        # Build local subtask assistant messages context
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Kognisant's Subtask Execution Agent. Complete the specific subtask assigned to you. Use tools. "
+                    "IMPORTANT DIRECTIVE: You are strictly forbidden from creating temporary, draft, or staging files (such as README_UPDATED.md). "
+                    "You must read, edit, or overwrite existing files (like 'README.md') directly inside the project root workspace."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Project Root files metadata: {json.dumps(project_info['files']) if project_info else '[]'}\n\nYour Subtask Description: {subtask['description']}",
+            },
+        ]
+
+        success = False
+        attempts = 0
+        response_content = ""
+
+        # Limit tool calls to prevent infinite loops in automated background agents
+        while attempts < 5:
+            # Check for pause and abort before each tool execution turn
+            if SwarmController.stop_event.is_set():
+                return
+            SwarmController.resume_event.wait()
+
+            attempts += 1
+
+            if task_model["name"] == "mock":
+                response_content = f"Simulated completed subtask: '{subtask['description']}' successfully offline."
+                success = True
+                break
+
+            if is_local:
+                response_content = query_model_api(
+                    task_model["api_base_url"],
+                    task_model.get("api_key", ""),
+                    task_model["name"],
+                    messages,
+                )
+                success = True
+                break
+
+            # Define subagent's baseline filesystem tools list
+            baseline_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_project_file",
+                        "description": "Read the contents of a specific file in the active project.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "The file path relative to project root.",
+                                }
+                            },
+                            "required": ["file_path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_project_file",
+                        "description": "Create a brand new file inside the project workspace root directory with specified content.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "The project-relative path of the new file to create.",
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The initial text content for the new file.",
+                                },
+                            },
+                            "required": ["file_path", "content"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_project_directory",
+                        "description": "Create a new directory (and any necessary parent directories) inside the project workspace root.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "directory_path": {
+                                    "type": "string",
+                                    "description": "The project-relative path of the directory to create.",
+                                }
+                            },
+                            "required": ["directory_path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "delete_project_path",
+                        "description": "Delete a file or directory recursively inside the project workspace root.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "The project-relative path of the file or directory to delete.",
+                                }
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "edit_project_file",
+                        "description": "Edit an existing file by applying find-and-replace edits sequentially.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "The file path relative to project root.",
+                                },
+                                "edits": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "old_text": {
+                                                "type": "string",
+                                                "description": "Precise code snippet to find.",
+                                            },
+                                            "new_text": {
+                                                "type": "string",
+                                                "description": "Code snippet to replace it with.",
+                                            },
+                                        },
+                                        "required": ["old_text", "new_text"],
+                                    },
+                                },
+                            },
+                            "required": ["file_path", "edits"],
+                        },
+                    },
+                },
+            ]
+
+            # Merge with globally transferable tools dynamically
+            subagent_tools = baseline_tools + load_global_tools()
+
+            # OpenAI / Cloud completion with full tool access
+            payload = {
+                "model": task_model["name"],
+                "messages": messages,
+                "stream": False,
+                "tools": subagent_tools,
+            }
+
+            resp_data = query_model_api_raw(
+                task_model["api_base_url"], task_model.get("api_key", ""), payload
+            )
+
+            if not resp_data or "choices" not in resp_data:
+                raise Exception("Empty or malformed JSON returned from the model API.")
+
+            choice = resp_data["choices"][0]
+            assistant_message = choice["message"]
+            tool_calls = assistant_message.get("tool_calls")
+
+            if tool_calls:
+                messages.append(assistant_message)
+                for tool_call in tool_calls:
+                    # Thread pause check before executing tool calls
+                    if SwarmController.stop_event.is_set():
+                        return
+                    SwarmController.resume_event.wait()
+
+                    call_id = tool_call.get("id")
+                    func_name = tool_call["function"]["name"]
+                    func_args = tool_call["function"]["arguments"]
+
+                    try:
+                        args_dict = json.loads(func_args)
+                        file_display = args_dict.get(
+                            "file_path",
+                            args_dict.get(
+                                "directory_path", args_dict.get("path", "file")
+                            ),
+                        )
+                    except Exception:
+                        file_display = "file"
+
+                    with print_lock:
+                        if func_name == "read_project_file":
+                            frames = ["◐", "◓", "◑", "◒"]
+                            for frame in frames:
+                                sys.stdout.write(
+                                    f"\r  {Colors.CYAN}{frame} [Reading]{Colors.RESET} {desc_display} (Scanning: {file_display}) "
+                                )
+                                sys.stdout.flush()
+                                time.sleep(0.05)
+                            result = execute_tool(func_name, func_args, project_info)
+                            sys.stdout.write(
+                                f"\r  {Colors.CYAN}✓ [Read]{Colors.RESET} {desc_display} ({Colors.GREEN}Done{Colors.RESET})\n"
+                            )
+                            sys.stdout.flush()
+                        elif func_name == "edit_project_file":
+                            frames = ["◴", "◷", "◶", "◵"]
+                            for frame in frames:
+                                sys.stdout.write(
+                                    f"\r  {Colors.YELLOW}{frame} [Writing]{Colors.RESET} {desc_display} (Modifying: {file_display}) "
+                                )
+                                sys.stdout.flush()
+                                time.sleep(0.05)
+                            result = execute_tool(func_name, func_args, project_info)
+                            sys.stdout.write(
+                                f"\r  {Colors.YELLOW}✓ [Write]{Colors.RESET} {desc_display} ({Colors.GREEN}Done{Colors.RESET})\n"
+                            )
+                            sys.stdout.flush()
+                        else:
+                            print(
+                                f"  🔧 Agent [{subtask_id}] Tool Call: {func_name}({func_args})"
+                            )
+                            sys.stdout.flush()
+                            result = execute_tool(func_name, func_args, project_info)
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": func_name,
+                            "content": result,
+                        }
+                    )
+                continue
+            else:
+                response_content = assistant_message.get("content", "")
+                success = True
+                break
+
+        results_dict[subtask_id] = {
+            "success": success,
+            "description": subtask["description"],
+            "response": response_content,
+        }
+
+        with print_lock:
+            if success:
+                print(
+                    f"  ✅ {Colors.GREEN}Agent [{subtask_id}] Completed:{Colors.RESET} Finished task: '{desc_display}'"
+                )
+            else:
+                reason = (
+                    response_content.strip().split("\n")[0][:120]
+                    if response_content
+                    else "No output details returned."
+                )
+                print(
+                    f"  ❌ {Colors.RED}Agent [{subtask_id}] Failed:{Colors.RESET} '{desc_display}' (Reason: {reason}...)"
+                )
+            sys.stdout.flush()
+
+    except Exception as e:
+        results_dict[subtask_id] = {
+            "success": False,
+            "description": subtask["description"],
+            "response": f"[Error] Agent crashed: {e}",
+        }
+        with print_lock:
+            print(f"  ❌ {Colors.RED}Agent [{subtask_id}] Crashed:{Colors.RESET} {e}")
+            sys.stdout.flush()
+    finally:
+        if is_local:
+            local_semaphore.release()
+
+
+def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=False):
+    """The actual background worker thread processing our strategic 4-stage pipeline."""
+    # Compile a blank swarm summary to prevent unbound static checks
+    swarm_summary = ""
+
+    # Dynamic Capability Analysis
+    if force_mock:
+        planning_model = {"name": "mock", "provider": "Offline", "api_base_url": ""}
+        task_model = {"name": "mock", "provider": "Offline", "api_base_url": ""}
+    else:
+        planning_model, task_model = get_best_models_pool(compiled_models)
+
+    # SDD (Spec-Driven Development) Auto-Detection
+    spec_info = None
+    compiled_spec = None
+    if project_info:
+        spec_match = re.search(
+            r"(?:specs/|spec\s+)([a-zA-Z0-9_\-]+)", user_task, re.IGNORECASE
+        )
+        if spec_match:
+            feature_name = spec_match.group(1)
+            spec_info = load_spec_info(project_info["root"], feature_name)
+            if spec_info:
+                from .sdd import compile_spec, validate_spec
+
+                # Phase 0: Compile Spec
+                compiled_spec = compile_spec(
+                    project_info["root"], feature_name, spec_info
+                )
+
+                # Phase 1: Validate Spec (Cheap syntax boundary check)
+                validation = validate_spec(compiled_spec)
+
+                if validation["errors"]:
+                    with print_lock:
+                        print(
+                            f"  ❌ {Colors.RED}Spec Validation Failed (Syntax Errors):{Colors.RESET}"
+                        )
+                        for err in validation["errors"]:
+                            print(f"     - {err}")
+                        print(
+                            "\n     Swarm aborted. Please correct your specs and retry.\n"
+                        )
+                        sys.stdout.flush()
+                    SwarmController.is_active = False
+                    return
+
+                with print_lock:
+                    print(
+                        f"  📋 {Colors.GREEN}Spec-Driven Development Active:{Colors.RESET} Loaded & compiled contract spec.json for feature '{feature_name}'!"
+                    )
+                    if validation["warnings"]:
+                        print(
+                            f"  🔍 {Colors.YELLOW}Spec Validation Warnings:{Colors.RESET}"
+                        )
+                        for warn in validation["warnings"]:
+                            print(f"     - {warn}")
+                    print()
+                    sys.stdout.flush()
+
+    # ==========================================
+    # 1. PLAN PHASE
+    # ==========================================
+    if SwarmController.stop_event.is_set():
+        SwarmController.is_active = False
+        return
+    SwarmController.resume_event.wait()
+
+    spinner = Spinner("Planning task strategy")
+    spinner.start()
+
+    plan_prompt = (
+        "You are Kognisant's Planning Agent. Analyze the following user task:\n"
+        f'"""\n{user_task}\n"""\n\n'
+    )
+
+    # Load context files
+    from .config import load_project_context, load_project_memory_guidelines
+
+    context_content = (
+        load_project_context(project_info["root"]) if project_info else None
+    )
+    guidelines_content = (
+        load_project_memory_guidelines(project_info["root"]) if project_info else None
+    )
+
+    if context_content:
+        plan_prompt += (
+            f"PROJECT BUILD CONTEXT (.kognisant/context.md):\n"
+            f"```markdown\n{context_content}\n```\n\n"
+        )
+
+    if guidelines_content:
+        plan_prompt += (
+            f"PROJECT STEERING MEMORY GUIDELINES (.kognisant/memory-guidlines.md):\n"
+            f"```markdown\n{guidelines_content}\n```\n\n"
+        )
+
+    plan_prompt += (
+        "Generate a structured, strategic step-by-step plan to complete this task. "
+        "Divide the subtasks into sequential execution phases (using an integer 'phase' field, starting at 1). "
+        "Independent research/cataloging tasks must go into earlier phases (e.g., Phase 1). "
+        "Drafting/writing/implementation edits must go into intermediate phases (e.g., Phase 2). "
+        "Validation and overwrite steps must go into final phases (e.g., Phase 3).\n\n"
+        "IMPORTANT DIRECTIVE: Kognisant does not support creating temporary, draft, or staging files (such as README_UPDATED.md). "
+        "All file-modifying subtasks must instruct the execution agents to edit or overwrite the target files (like 'README.md') directly.\n\n"
+    )
+
+    if spec_info:
+        plan_prompt += (
+            f"CRITICAL SDD BOUNDARY:\n"
+            f"You are implementing the SPECIFICATION for feature '{spec_info['feature']}'.\n"
+            f"Requirements:\n```markdown\n{spec_info.get('requirements', 'None')}\n```\n\n"
+            f"Design Architecture:\n```markdown\n{spec_info.get('design', 'None')}\n```\n\n"
+            f"Spec Task Checklist (tasks.md):\n```markdown\n{spec_info.get('tasks', 'None')}\n```\n\n"
+            f"IMPORTANT: You must base your sequential phase subtasks strictly on the checklist provided in tasks.md! "
+            f"Do not invent independent structures; translate the tasks.md checklist directly into Kognisant execution phases.\n\n"
+        )
+
+    plan_prompt += (
+        "You must return your entire response as a valid, parsable JSON block matching this schema:\n"
+        "{\n"
+        '  "intent": "Brief summary of user task intent",\n'
+        '  "beliefs": "What is currently known to be true about the project structure/goal",\n'
+        '  "concepts": "Core codebase concepts involved",\n'
+        '  "strategy": "Your step-by-step strategic path",\n'
+        '  "subtasks": [\n'
+        "    {\n"
+        '      "description": "Specific instruction for an execution agent to run (e.g. read file X, edit file Y to add function Z)",\n'
+        '      "phase": 1\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Ensure you do not output any surrounding conversation text, only the raw JSON block."
+    )
+
+    try:
+        if planning_model["name"] == "mock":
+            plan_data = {
+                "intent": f"Simulated execution of task: '{user_task}'",
+                "beliefs": "Running inside unauthenticated offline simulation mode.",
+                "concepts": "Mock framework, testing primitives, dry run parameters",
+                "strategy": "Formulate mock strategy, execute parallel threads, summarize outcome.",
+                "subtasks": [
+                    {
+                        "description": f"Read codebase files to inspect '{user_task}' context",
+                        "phase": 1,
+                    },
+                    {
+                        "description": f"Edit target files sequentially to integrate '{user_task}' components",
+                        "phase": 2,
+                    },
+                ],
+            }
+        else:
+            plan_content = query_model_api(
+                planning_model["api_base_url"],
+                planning_model.get("api_key", ""),
+                planning_model["name"],
+                [{"role": "user", "content": plan_prompt}],
+            ).strip()
+
+            if "xml" in plan_content:
+                pass
+            if "```json" in plan_content:
+                plan_content = (
+                    plan_content.split("```json", 1)[1].split("```", 1)[0].strip()
+                )
+            elif "```" in plan_content:
+                plan_content = (
+                    plan_content.split("```", 1)[1].split("```", 1)[0].strip()
+                )
+
+            plan_data = json.loads(plan_content)
+    except Exception as e:
+        spinner.stop()
+        with print_lock:
+            print(
+                f"  ❌ {Colors.RED}Planning Failed:{Colors.RESET} Could not generate strategic plan. Error: {e}"
+            )
+            sys.stdout.flush()
+        SwarmController.is_active = False
+        return
+
+    spinner.stop()
+
+    with print_lock:
+        print(f"  📝 {Colors.BOLD}Strategic Plan Formulated:{Colors.RESET}")
+        print(
+            f"     - {Colors.CYAN}Intent:{Colors.RESET} {plan_data.get('intent', 'N/A')}"
+        )
+        print(
+            f"     - {Colors.CYAN}Beliefs:{Colors.RESET} {plan_data.get('beliefs', 'N/A')}"
+        )
+        print(
+            f"     - {Colors.CYAN}Concepts:{Colors.RESET} {plan_data.get('concepts', 'N/A')}"
+        )
+        print(
+            f"     - {Colors.CYAN}Strategy:{Colors.RESET} {plan_data.get('strategy', 'N/A')}\n"
+        )
+        sys.stdout.flush()
+
+    subtasks = plan_data.get("subtasks", [])
+    if not subtasks:
+        with print_lock:
+            print(
+                f"  ⚠️  {Colors.YELLOW}No execution subtasks formulated. Ending pipeline.{Colors.RESET}\n"
+            )
+            sys.stdout.flush()
+        SwarmController.is_active = False
+        return
+
+    # ========================================================
+    # 2 & 3. EXECUTE & REFLECT PHASES (Corrective Retry Loop)
+    # ========================================================
+    results_dict = {}
+    max_correction_loops = 2
+    reflection_content = ""
+    reflect_data = {}
+
+    for loop in range(max_correction_loops + 1):
+        if SwarmController.stop_event.is_set():
+            break
+        SwarmController.resume_event.wait()
+
+        phases_dict = {}
+        for task in subtasks:
+            phase_num = int(task.get("phase", 1))
+            if phase_num not in phases_dict:
+                phases_dict[phase_num] = []
+            phases_dict[phase_num].append(task)
+
+        sorted_phase_keys = sorted(phases_dict.keys())
+        idx_counter = 1
+        results_dict.clear()
+
+        for phase_num in sorted_phase_keys:
+            if SwarmController.stop_event.is_set():
+                break
+            SwarmController.resume_event.wait()
+
+            phase_tasks = phases_dict[phase_num]
+
+            with print_lock:
+                print(
+                    f"  ⚡ {Colors.BOLD}Executing Phase {phase_num} Swarm ({len(phase_tasks)} Tasks in Parallel):{Colors.RESET}"
+                )
+                sys.stdout.flush()
+
+            threads = []
+            for task in phase_tasks:
+                t = threading.Thread(
+                    target=run_subtask_agent,
+                    args=(task, task_model, project_info, results_dict, idx_counter),
+                    daemon=True,
+                )
+                threads.append(t)
+                idx_counter += 1
+                t.start()
+
+            for t in threads:
+                t.join()
+
+            with print_lock:
+                print(
+                    f"  ✅ {Colors.GREEN}Phase {phase_num} Swarm Completed.{Colors.RESET}\n"
+                )
+                sys.stdout.flush()
+
+        if SwarmController.stop_event.is_set():
+            break
+        SwarmController.resume_event.wait()
+
+        with print_lock:
+            print(
+                f"  ✅ {Colors.BOLD}Execution Phase {loop + 1} Swarm Completed.{Colors.RESET}\n"
+            )
+            sys.stdout.flush()
+
+        swarm_summary = ""
+        for idx, res in sorted(results_dict.items()):
+            status = "SUCCESS" if res["success"] else "FAILED"
+            swarm_summary += f"Subtask [{idx}]: {res['description']} -> Status: {status}\nResponse:\n{res['response']}\n\n"
+
+        # REFLECTION STAGE
+        if SwarmController.stop_event.is_set():
+            break
+        SwarmController.resume_event.wait()
+
+        spinner = Spinner("Reflecting on swarm outcomes")
+        spinner.start()
+
+        reflect_prompt = (
+            "You are Kognisant's Reflection Agent. Analyze the user's initial task, the strategic plan, and the results of our sequential execution phases.\n\n"
+            f'Initial User Task: "{user_task}"\n\n'
+            f"Plan Formulated: {json.dumps(plan_data, indent=2)}\n\n"
+            f'Swarm Outcomes:\n"""\n{swarm_summary}"""\n\n'
+            "Evaluate the results rigorously. Did we successfully complete all strategic goals? Is the code integration functionally sound?\n"
+            "You must return your response as a valid, parsable JSON block matching this schema:\n"
+            "{\n"
+            '  "completed": true or false (true ONLY if all goals are fully met and code is functionally sound, false if we need to retry or correct anything),\n'
+            '  "critique": "Comprehensive summary of your critique, calling out what went right, what went wrong, and why",\n'
+            '  "adjustments": [\n'
+            "    {\n"
+            '      "description": "Specific corrective instruction for an agent to run in the next loop to fix the identified issues (e.g. Re-run subtask X with feedback Y)",\n'
+            '      "phase": 1\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Ensure you do not output any surrounding conversation text, only the raw JSON block."
+        )
+
+        try:
+            if planning_model["name"] == "mock":
+                reflect_data = {
+                    "completed": True,
+                    "critique": "Simulation check passed. All modular objectives successfully accomplished.",
+                    "adjustments": [],
+                }
+            else:
+                reflection_content = query_model_api(
+                    planning_model["api_base_url"],
+                    planning_model.get("api_key", ""),
+                    planning_model["name"],
+                    [{"role": "user", "content": reflect_prompt}],
+                ).strip()
+
+                if "```json" in reflection_content:
+                    reflection_content = (
+                        reflection_content.split("```json", 1)[1]
+                        .split("```", 1)[0]
+                        .strip()
+                    )
+                elif "```" in reflection_content:
+                    reflection_content = (
+                        reflection_content.split("```", 1)[1].split("```", 1)[0].strip()
+                    )
+
+                reflect_data = json.loads(reflection_content)
+        except Exception as e:
+            reflect_data = {
+                "completed": True,
+                "critique": f"Could not parse critique: {e}. Defaulting to completed.",
+                "adjustments": [],
+            }
+
+        spinner.stop()
+
+        with print_lock:
+            print(
+                f"  🔍 {Colors.BOLD}Reflection Summary Loop {loop + 1}:{Colors.RESET}"
+            )
+            print(
+                f"     {reflect_data.get('critique', 'No critique summary provided.')}\n"
+            )
+            sys.stdout.flush()
+
+        if reflect_data.get("completed", True):
+            break
+
+        adjustments = reflect_data.get("adjustments", [])
+        if not adjustments or loop == max_correction_loops:
+            with print_lock:
+                print(
+                    f"  ❌ {Colors.RED}Self-Correction limit reached or no adjustments formulated. Proceeding to persistence...{Colors.RESET}\n"
+                )
+                sys.stdout.flush()
+            break
+
+        with print_lock:
+            print(
+                f"  ⚠️  {Colors.YELLOW}Reflection Rejected Outcomes. Initiating Self-Correction Loop {loop + 1}/{max_correction_loops}...{Colors.RESET}\n"
+            )
+            sys.stdout.flush()
+        subtasks = adjustments
+
+    # ==========================================
+    # 4. PERSIST PHASE (Self-modeling context)
+    # ==========================================
+    if SwarmController.stop_event.is_set():
+        SwarmController.is_active = False
+        return
+    SwarmController.resume_event.wait()
+
+    if not project_info:
+        SwarmController.is_active = False
+        return
+
+    spinner = Spinner("Persisting memory and context changes")
+    spinner.start()
+
+    persist_prompt = (
+        "You are Kognisant's Persistence Agent. Evaluate the completed task, our plan, the reflection, and the codebase files.\n"
+        "We need to update our memories:\n"
+        "1. Local Membrain (.kognisant/context.md): What project phases, checkbox tasks, or decisions should be marked completed or modified?\n"
+        "2. Global Core Memory (~/.kognisant_core/skills/): Is there any universal, transferable coding skill, pattern, or lesson learned we should save as a Markdown skill file so we can reuse it across other projects?\n\n"
+        f'User Task: "{user_task}"\n\n'
+        f'Reflection: "{reflect_data.get("critique", "")}"\n\n'
+        "Output a valid JSON block containing updates to apply:\n"
+        "{\n"
+        '  "project_context_update": "A concise instruction on how to update .kognisant/context.md (e.g. check off task X, move phase Y to completed)",\n'
+        '  "global_skill_title": "Title of any new transferable skill discovered (e.g. pytest_mock_conventions). Leave empty if none.",\n'
+        '  "global_skill_content": "Full markdown text of the transferable skill to save in ~/.kognisant_core/skills/<title>.md. Leave empty if none."\n'
+        "}\n\n"
+        "Ensure you only output the raw JSON block."
+    )
+
+    try:
+        if planning_model["name"] == "mock":
+            persist_raw = (
+                "{\n"
+                '  "project_context_update": "Check off simulated task items inside .kognisant/context.md.",\n'
+                '  "global_skill_title": "simulated_learning_caps",\n'
+                '  "global_skill_content": "# Simulated Learning Cards\\n\\n- Accomplished dry run execution of agent swarm."\n'
+                "}"
+            )
+        else:
+            persist_raw = query_model_api(
+                planning_model["api_base_url"],
+                planning_model.get("api_key", ""),
+                planning_model["name"],
+                [{"role": "user", "content": persist_prompt}],
+            )
+
+        if not persist_raw:
+            raise Exception("No response received from the Persistence Agent.")
+
+        persist_raw = persist_raw.strip()
+        if "```json" in persist_raw:
+            persist_raw = persist_raw.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in persist_raw:
+            persist_raw = persist_raw.split("```", 1)[1].split("```", 1)[0].strip()
+
+        persist_data = json.loads(persist_raw)
+
+        # Apply Project Memory updates (self-modifying context!)
+        context_path = os.path.join(project_info["root"], ".kognisant", "context.md")
+        context_update_inst = persist_data.get("project_context_update", "").strip()
+
+        if context_update_inst and os.path.exists(context_path):
+            with open(context_path, "r", encoding="utf-8") as f:
+                old_context = f.read()
+
+            if planning_model["name"] == "mock":
+                updated_context = (
+                    old_context + f"\n- [x] {user_task} (Simulated Completed)"
+                )
+            else:
+                mod_prompt = (
+                    f"Modify this .kognisant/context.md file according to the following instruction:\n"
+                    f'Instruction: "{context_update_inst}"\n\n'
+                    f"Original context.md:\n```markdown\n{old_context}\n```\n\n"
+                    "Return ONLY the updated context.md markdown content. Do not include conversational text or wrapping codeblocks."
+                )
+
+                updated_context = query_model_api(
+                    planning_model["api_base_url"],
+                    planning_model.get("api_key", ""),
+                    planning_model["name"],
+                    [{"role": "user", "content": mod_prompt}],
+                ).strip()
+
+                if "```markdown" in updated_context:
+                    updated_context = (
+                        updated_context.split("```markdown", 1)[1]
+                        .split("```", 1)[0]
+                        .strip()
+                    )
+                elif "```" in updated_context:
+                    updated_context = (
+                        updated_context.split("```", 1)[1].split("```", 1)[0].strip()
+                    )
+
+            with open(context_path, "w", encoding="utf-8") as f:
+                f.write(updated_context)
+
+            with print_lock:
+                print(
+                    f"  💾 {Colors.GREEN}Project Membrain Saved:{Colors.RESET} Updated '.kognisant/context.md' task items autonomously."
+                )
+                sys.stdout.flush()
+
+        # Apply SDD (Spec-Driven Development) Task Checklist updates autonomously (Phase 4)!
+        if spec_info and compiled_spec:
+            # Update task states based on result outcomes
+            for idx, res in results_dict.items():
+                if res["success"]:
+                    for task in compiled_spec.get("tasks", []):
+                        if (
+                            task["description"].lower() in res["description"].lower()
+                            or res["description"].lower() in task["description"].lower()
+                        ):
+                            task["completed"] = True
+
+            # Calculate overall state
+            total_tasks = len(compiled_spec.get("tasks", []))
+            done_tasks = sum(
+                1 for t in compiled_spec.get("tasks", []) if t["completed"]
+            )
+            if done_tasks == total_tasks:
+                compiled_spec["task_state"] = "COMPLETED"
+            elif done_tasks > 0:
+                compiled_spec["task_state"] = "IN_PROGRESS"
+
+            # Write back compiled spec.json contract
+            spec_json_path = os.path.join(spec_info["root"], "spec.json")
+            with open(spec_json_path, "w", encoding="utf-8") as f:
+                json.dump(compiled_spec, f, indent=2)
+
+            # Generate the human-readable tasks.md scratchpad log directly from the contract spec.json!
+            tasks_path = os.path.join(spec_info["root"], "tasks.md")
+            with open(tasks_path, "w", encoding="utf-8") as f:
+                f.write(f"# Tasks Checklist — {spec_info['feature']}\n\n")
+                f.write(
+                    f"Last updated: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                )
+                f.write(
+                    f"Swarm Status: {compiled_spec['task_state']} ({done_tasks}/{total_tasks} completed)\n\n"
+                )
+                for task in compiled_spec.get("tasks", []):
+                    check = "[x]" if task["completed"] else "[ ]"
+                    f.write(f"- {check} {task['description']}\n")
+
+            with print_lock:
+                print(
+                    f"  💾 {Colors.GREEN}Spec Membrain Saved:{Colors.RESET} Updated '.kognisant/specs/{spec_info['feature']}/tasks.md' autonomously."
+                )
+                sys.stdout.flush()
+
+        # Apply Global Memory updates (transferable skills!)
+        skill_title = (
+            persist_data.get("global_skill_title", "").strip().lower().replace(" ", "_")
+        )
+        skill_content = persist_data.get("global_skill_content", "").strip()
+
+        if skill_title and skill_content:
+            if not skill_title.endswith(".md"):
+                skill_title = f"{skill_title}.md"
+
+            skills_dir = os.path.join(GLOBAL_CORE_DIR, "skills")
+            os.makedirs(skills_dir, exist_ok=True)
+            skill_path = os.path.join(skills_dir, skill_title)
+
+            with open(skill_path, "w", encoding="utf-8") as f:
+                f.write(skill_content)
+
+            with print_lock:
+                print(
+                    f"  💾 {Colors.GREEN}Global Core Memory Saved:{Colors.RESET} Registered new transferable skill: '~/.kognisant_core/skills/{skill_title}'"
+                )
+                sys.stdout.flush()
+
+    except Exception as e:
+        with print_lock:
+            print(
+                f"  ⚠️  {Colors.YELLOW}Persistence Warning:{Colors.RESET} Memory update failed: {e}"
+            )
+            sys.stdout.flush()
+
+    spinner.stop()
+    with print_lock:
+        print(
+            f"\n  ✨ {Colors.BOLD}PERP Swarm Process Finished Successfully!{Colors.RESET}\n"
+        )
+        sys.stdout.flush()
+
+    # Release global active flag
+    SwarmController.is_active = False
+
+
+def perp_orchestrate(user_task, project_info, compiled_models, force_mock=False):
+    """Orchestrates and launches the PERP Swarm pipeline on an asynchronous background thread."""
+    # Enforce non-blocking: Check if another swarm is already running
+    if SwarmController.is_active:
+        print(
+            f"\n  ⚠️  {Colors.YELLOW}Wait:{Colors.RESET} Another background swarm is currently executing. Type {Colors.CYAN}/status{Colors.RESET} or {Colors.CYAN}/stop{Colors.RESET}.\n"
+        )
+        return
+
+    # Reset thread-safe Controller Events
+    SwarmController.stop_event.clear()
+    SwarmController.resume_event.set()
+    SwarmController.is_active = True
+    SwarmController.is_paused = False
+    SwarmController.active_task_description = user_task
+
+    # Spawn and start the background thread worker instantly!
+    t = threading.Thread(
+        target=_orchestrate_worker,
+        args=(user_task, project_info, compiled_models, force_mock),
+        daemon=True,
+    )
+    t.start()

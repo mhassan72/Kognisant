@@ -1,0 +1,37 @@
+# Python bytecode and caching
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments and dependencies
+.venv/
+venv/
+ENV/
+env/
+bin/
+lib/
+include/
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+cli_kognisant.egg-info/
+.eggs/
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Kognisant logs and history files
+*.bak
+*.log
+.kognisant/history/
+.kognisant/specs/*/spec.json
+.kognisant/

@@ -70,6 +70,14 @@ def get_tool_call_description(func_name, func_args):
         return desc
 
 
+def requires_api_key(provider_name, api_key):
+    """Determines if a model provider requires an API key prompt (Ollama is exempt)."""
+    if "ollama" in provider_name.lower():
+        return False
+    # Standard requirement: key is missing or is the default 'your-...' placeholder
+    return not api_key or "your-" in api_key
+
+
 def build_system_prompt(project_info):
     """Builds the initial system prompt containing project context, local Membrain, and global skills."""
     files_str = "\n".join([f"- {f}" for f in project_info["files"][:100]])
@@ -288,9 +296,7 @@ def process_slash_commands(
                 provider_name = selected.get("provider", "")
                 api_key = selected.get("api_key", "")
 
-                if provider_name != "Ollama (Local)" and (
-                    not api_key or "your-" in api_key
-                ):
+                if requires_api_key(provider_name, api_key):
                     print(
                         f"\n  🔑 {Colors.YELLOW}The provider '{provider_name}' requires an API Key.{Colors.RESET}"
                     )
@@ -1070,9 +1076,7 @@ def select_model(models):
                 provider_name = selected.get("provider", "")
                 api_key = selected.get("api_key", "")
 
-                if provider_name != "Ollama (Local)" and (
-                    not api_key or "your-" in api_key
-                ):
+                if requires_api_key(provider_name, api_key):
                     print(
                         f"\n  🔑 {Colors.YELLOW}The provider '{provider_name}' requires an API Key.{Colors.RESET}"
                     )
@@ -1160,9 +1164,7 @@ def chat_flow():
             provider_name = selected.get("provider", "")
             api_key = selected.get("api_key", "")
 
-            if provider_name != "Ollama (Local)" and (
-                not api_key or "your-" in api_key
-            ):
+            if requires_api_key(provider_name, api_key):
                 # Prompt them cleanly by passing it through the select_model flow
                 # (which has the interactive key prompter built-in)
                 selected = select_model([selected])

@@ -883,6 +883,37 @@ def get_compiled_models():
                         }
                         compiled_models.append(flat_model)
 
+                # Dynamic Ollama Auto-Discovery
+                if provider_name == "Ollama (Local)":
+                    try:
+                        from .network import OLLAMA_HOST, get_ollama_models
+
+                        local_tags = get_ollama_models()
+                        if local_tags:
+                            # Avoid duplicates: track what IDs are already in the list for this provider
+                            existing_ids = {
+                                m.get("model_id", m.get("name"))
+                                for m in models_list
+                                if isinstance(m, dict)
+                            }
+                            for tag in local_tags:
+                                if tag not in existing_ids:
+                                    # Dynamically inject newly discovered local model into the active pool
+                                    dynamic_model = {
+                                        "name": tag,
+                                        "display_name": tag,
+                                        "provider": provider_name,
+                                        "api_base_url": f"{OLLAMA_HOST}/v1",
+                                        "api_key": "",
+                                        "capabilities": {
+                                            "tool_calling": True,
+                                            "reasoning": True,
+                                        },
+                                    }
+                                    compiled_models.append(dynamic_model)
+                    except Exception:
+                        pass
+
     return compiled_models
 
 

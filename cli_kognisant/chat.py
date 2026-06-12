@@ -262,7 +262,7 @@ def process_slash_commands(
             print(
                 f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}){is_active}"
             )
-        print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom OpenAI-compatible model")
+        print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
         print("    [Enter] Cancel and resume chat\n")
 
         try:
@@ -964,7 +964,7 @@ def select_model(models):
         print(
             f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET})"
         )
-    print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom OpenAI-compatible model")
+    print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
     print("    [Enter] Cancel and resume chat\n")
 
     while True:
@@ -981,11 +981,25 @@ def select_model(models):
         if choice.lower() == "a":
             # Add custom model interactively
             print(
-                f"\n  ➕ {Colors.BOLD}Add a Custom OpenAI-Compatible Model{Colors.RESET}\n"
+                f"\n  ➕ {Colors.BOLD}Add a Custom Model Configuration{Colors.RESET}\n"
             )
             try:
+                protocol = (
+                    input(
+                        "     1. Select Protocol (openai, ollama, llama_cpp) [default: openai]: "
+                    )
+                    .strip()
+                    .lower()
+                    or "openai"
+                )
+                if protocol not in ("openai", "ollama", "llama_cpp"):
+                    print(
+                        f"     {Colors.RED}Unsupported protocol '{protocol}'. Using 'openai'.{Colors.RESET}"
+                    )
+                    protocol = "openai"
+
                 provider_name = input(
-                    "     1. Enter Provider Name (e.g. OpenRouter, Groq): "
+                    "     2. Enter Provider Name (e.g. OpenRouter, MyLocal): "
                 ).strip()
                 if not provider_name:
                     print(
@@ -994,7 +1008,7 @@ def select_model(models):
                     continue
 
                 model_name = input(
-                    "     2. Enter Model Name (e.g. Kimi-K2.6): "
+                    "     3. Enter Model Display Name (e.g. Llama-3-70B): "
                 ).strip()
                 if not model_name:
                     print(
@@ -1003,20 +1017,20 @@ def select_model(models):
                     continue
 
                 model_id = input(
-                    "     3. Enter Model ID (e.g. moonshotai/Kimi-K2.6): "
+                    "     4. Enter actual Model ID string (e.g. llama3): "
                 ).strip()
                 if not model_id:
                     print(f"     {Colors.RED}Model ID cannot be empty.{Colors.RESET}\n")
                     continue
 
                 api_base_url = input(
-                    "     4. Enter Base URL (e.g. https://api.openai.com/v1): "
+                    "     5. Enter Base URL (e.g. http://localhost:11434): "
                 ).strip()
                 if not api_base_url:
                     print(f"     {Colors.RED}Base URL cannot be empty.{Colors.RESET}\n")
                     continue
 
-                api_key = input("     5. Enter API Key (press Enter if none): ").strip()
+                api_key = input("     6. Enter API Key (press Enter if none): ").strip()
             except (EOFError, KeyboardInterrupt):
                 return None
 
@@ -1024,6 +1038,7 @@ def select_model(models):
                 "name": model_id,
                 "display_name": model_name,
                 "provider": provider_name,
+                "protocol": protocol,
                 "api_base_url": api_base_url,
                 "api_key": api_key,
                 "capabilities": {"tool_calling": True, "reasoning": True},
@@ -1048,6 +1063,7 @@ def select_model(models):
                 "vendor": provider_name,
                 "name": model_name,
                 "model_id": model_id,
+                "protocol": protocol,
                 "api_base_url": api_base_url,
                 "capabilities": {"tool_calling": True, "reasoning": True},
             }

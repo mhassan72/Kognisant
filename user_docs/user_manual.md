@@ -82,6 +82,7 @@ Upon running `init`, Kognisant configures the local workspace boundary:
 3.  **Compiles `.kognisant/context.md`**: This is the primary **Membrain** file. It stores project-level milestones, active development phases, and structural maps.
 4.  **Enforces `.kognisant/memory-guidlines.md`**: Establishes strict rules guiding how agents can interact with and update files.
 5.  **Registers Project Globally**: Automatically links the absolute path of this project with `~/.kognisant_core/projects.json` so your global assistant remains aware of your active workspaces.
+The global assistant remains aware of your active workspaces. Kognisant now supports multiple API protocols natively, including **OpenAI**, **Ollama Native**, and **Llama.cpp Native**.
 
 ---
 
@@ -95,10 +96,17 @@ kognisant chat
 
 On startup, Kognisant auto-detects your local environment, syncs active model configs, and initializes a beautiful interactive prompt. 
 
-### Model Selection & Config Wizard
+### Model selection & Config Wizard
 If multiple models or providers are configured in your global model pool (`~/.kognisant_core/models_pool.json`), Kognisant prompts you with an interactive selection menu on launch, showing:
-*   Local Ollama models (e.g., `gemma3:1b`).
+*   Local Ollama models (via native `/api/chat` or OpenAI-compatible endpoints).
+*   Llama.cpp servers (via native `/completion` or `/v1/chat/completions`).
 *   Cloud endpoints (OpenAI, DeepSeek, Anthropic, or any custom OpenAI-compatible endpoint).
+
+### Supported API Protocols
+Kognisant is built to be truly model-agnostic. You can configure the `protocol` field in your `models_pool.json`:
+*   `openai`: The standard for most cloud and local wrappers.
+*   `ollama`: Uses Ollama's native high-performance chat API.
+*   `llama_cpp`: Supports Llama.cpp's native server API, including automatic conversion of chat messages to formatted prompts.
 
 ---
 

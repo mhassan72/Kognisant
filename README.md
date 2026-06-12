@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Project Status](https://img.shields.io/badge/status-active-success.svg)
 
-A dependency-free Python CLI that transforms your terminal into an autonomous coding environment. Kognisant connects seamlessly to local LLMs via **Ollama** and any **OpenAI-compatible API** (OpenAI, DeepSeek, OpenRouter, Groq, and custom endpoints). It features dynamic ANSI animations, persistent local and global memory layers (“Membrain”), built-in agentic tool execution, headless web browsing, and an interactive multi-turn chat with checkpoint-based rollback.
+A dependency-free Python CLI that transforms your terminal into an autonomous coding environment. Kognisant connects seamlessly to local LLMs via **Ollama Native**, **Llama.cpp**, and any **OpenAI-compatible API** (OpenAI, DeepSeek, OpenRouter, Groq, and custom endpoints). It features dynamic ANSI animations, persistent local and global memory layers (“Membrain”), built-in agentic tool execution, headless web browsing, and an interactive multi-turn chat with checkpoint-based rollback.
 
 ---
 
@@ -47,7 +47,7 @@ Core design goals:
 - **Thread-Safe Spinners** — Smooth Braille spinners during model inference.
 
 ### Multi-Provider AI Support
-- **100% Model-Agnostic** — Chat with Ollama, OpenAI, DeepSeek, or add any custom OpenAI-compatible endpoint on the fly.
+- **100% Model-Agnostic** — Chat with Ollama (Native), Llama.cpp (Native), OpenAI, DeepSeek, or add any custom OpenAI-compatible endpoint on the fly.
 - **Interactive Model Wizard** — Switch models mid-session, add new endpoints, and securely persist API keys globally.
 - **Sticky Default Model** — Your last selected model is automatically persisted in `~/.kognisant_core/models_pool.json`. The next time you launch `kognisant chat`, it resumes with your preferred endpoint—no re-selection required (`config.py`).
 - **Dynamic Capability Routing** — The PERP swarm automatically delegates planning to cloud models and tasks to local models when available (`agents.py`).

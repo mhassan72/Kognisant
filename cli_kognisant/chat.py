@@ -800,7 +800,10 @@ def run_api_chat(model_config, project_info=None):
                     payload["tools"] = get_active_tools()
 
                 resp_data = query_model_api_raw(
-                    model_config["api_base_url"], model_config["api_key"], payload
+                    model_config["api_base_url"],
+                    model_config["api_key"],
+                    payload,
+                    protocol=model_config.get("protocol", "openai"),
                 )
 
                 if not resp_data or "choices" not in resp_data:

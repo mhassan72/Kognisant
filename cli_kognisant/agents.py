@@ -141,6 +141,7 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                     task_model.get("api_key", ""),
                     task_model["name"],
                     messages,
+                    protocol=task_model.get("protocol", "openai"),
                 )
                 success = True
                 break
@@ -267,7 +268,10 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             }
 
             resp_data = query_model_api_raw(
-                task_model["api_base_url"], task_model.get("api_key", ""), payload
+                task_model["api_base_url"],
+                task_model.get("api_key", ""),
+                payload,
+                protocol=task_model.get("protocol", "openai"),
             )
 
             if not resp_data or "choices" not in resp_data:
@@ -544,6 +548,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 planning_model.get("api_key", ""),
                 planning_model["name"],
                 [{"role": "user", "content": plan_prompt}],
+                protocol=planning_model.get("protocol", "openai"),
             ).strip()
 
             if "xml" in plan_content:
@@ -709,6 +714,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     planning_model.get("api_key", ""),
                     planning_model["name"],
                     [{"role": "user", "content": reflect_prompt}],
+                    protocol=planning_model.get("protocol", "openai"),
                 ).strip()
 
                 if "```json" in reflection_content:
@@ -806,6 +812,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 planning_model.get("api_key", ""),
                 planning_model["name"],
                 [{"role": "user", "content": persist_prompt}],
+                protocol=planning_model.get("protocol", "openai"),
             )
 
         if not persist_raw:
@@ -844,6 +851,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     planning_model.get("api_key", ""),
                     planning_model["name"],
                     [{"role": "user", "content": mod_prompt}],
+                    protocol=planning_model.get("protocol", "openai"),
                 ).strip()
 
                 if "```markdown" in updated_context:

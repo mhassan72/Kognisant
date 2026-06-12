@@ -409,6 +409,25 @@ def init_global_core():
                             }
                         ],
                     },
+                    {
+                        "provider": "Llama.cpp (Local)",
+                        "api_key": "",
+                        "models": [
+                            {
+                                "vendor": "Local",
+                                "name": "llama-3-8b",
+                                "model_id": "llama-3-8b",
+                                "protocol": "llama_cpp",
+                                "api_base_url": "http://localhost:8080",
+                                "context_window": 8192,
+                                "modality": "text-to-text",
+                                "capabilities": {
+                                    "tool_calling": False,
+                                    "reasoning": True,
+                                },
+                            }
+                        ],
+                    },
                 ]
             }
             with open(pool_path, "w", encoding="utf-8") as f:
@@ -866,6 +885,17 @@ def get_compiled_models():
 
                 if isinstance(models_list, list):
                     for m in models_list:
+                        # Determine protocol based on provider name if not explicitly set
+                        protocol = m.get("protocol")
+                        if not protocol:
+                            p_lower = provider_name.lower()
+                            if "ollama" in p_lower:
+                                protocol = "ollama"
+                            elif "llama" in p_lower or "cpp" in p_lower:
+                                protocol = "llama_cpp"
+                            else:
+                                protocol = "openai"
+
                         flat_model = {
                             "name": m.get(
                                 "model_id", m.get("name")
@@ -874,6 +904,7 @@ def get_compiled_models():
                                 "name", "Unknown"
                             ),  # friendly display name in CLI selector
                             "provider": provider_name,
+                            "protocol": protocol,
                             "api_base_url": m.get("api_base_url", ""),
                             "api_key": api_key,
                             "capabilities": m.get(
@@ -903,7 +934,8 @@ def get_compiled_models():
                                         "name": tag,
                                         "display_name": tag,
                                         "provider": provider_name,
-                                        "api_base_url": f"{OLLAMA_HOST}/v1",
+                                        "protocol": "ollama",
+                                        "api_base_url": f"{OLLAMA_HOST}",  # Use base host for native API
                                         "api_key": "",
                                         "capabilities": {
                                             "tool_calling": True,

@@ -28,15 +28,41 @@ def get_ollama_models():
     return None
 
 
-def query_model_api_raw(api_base_url, api_key, payload):
-    """Sends a payload to any standard OpenAI-compatible API with retry and backoff on transient errors."""
+def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
+    """Sends a payload to any supported API protocol (OpenAI, Ollama, Llama.cpp) with retry and backoff."""
     url = api_base_url.rstrip("/")
-    if not url.endswith("/chat/completions") and not url.endswith("/chat"):
-        url = f"{url}/chat/completions"
+
+    if protocol == "ollama":
+        if not url.endswith("/api/chat"):
+            url = f"{url}/api/chat"
+    elif protocol == "llama_cpp":
+        if not url.endswith("/completion") and not url.endswith("/v1/chat/completions"):
+            # Prefer OpenAI-compatible endpoint if available in llama.cpp server, fallback to native completion
+            url = f"{url}/v1/chat/completions"
+    else:  # Default to openai
+        if not url.endswith("/chat/completions") and not url.endswith("/chat"):
+            url = f"{url}/chat/completions"
 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
+    # Adaptive Payload Conversion (if necessary)
+    if protocol == "llama_cpp" and url.endswith("/completion"):
+        # Convert Chat messages to single prompt for llama.cpp native completion API
+        messages = payload.get("messages", [])
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            prompt += f"\n\n{role.upper()}: {content}"
+        prompt += "\n\nASSISTANT: "
+
+        payload = {
+            "prompt": prompt,
+            "stream": False,
+            "n_predict": 2048,
+        }
 
     req_body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=req_body, headers=headers, method="POST")
@@ -49,7 +75,7 @@ def query_model_api_raw(api_base_url, api_key, payload):
 
     for attempt in range(max_retries):
         try:
-            with urllib.request.urlopen(req, timeout=45.0, context=context) as response:
+            with urllib.request.urlopen(req, timeout=60.0, context=context) as response:
                 if response.status == 200:
                     try:
                         return json.loads(response.read().decode("utf-8"))
@@ -61,7 +87,7 @@ def query_model_api_raw(api_base_url, api_key, payload):
                     raise KognisantAPIError(f"HTTP Error {response.status} from API.")
 
         except urllib.error.HTTPError as e:
-            # Retry on transient status codes: 429 (Too Many Requests), 502 (Bad Gateway), 503 (Service Unavailable), 504 (Gateway Timeout)
+            # Retry on transient status codes
             if e.code in [429, 502, 503, 504] and attempt < max_retries - 1:
                 time.sleep(backoff)
                 backoff *= 2.0
@@ -83,14 +109,34 @@ def query_model_api_raw(api_base_url, api_key, payload):
             raise KognisantAPIError(f"Network Connection Failed: {e}")
 
 
-def query_model_api(api_base_url, api_key, model_name, messages):
-    """Queries any standard OpenAI-compatible Chat Completions API endpoint and returns content."""
+def query_model_api(api_base_url, api_key, model_name, messages, protocol="openai"):
+    """Queries any supported API protocol and returns content."""
     payload = {"model": model_name, "messages": messages, "stream": False}
-    resp_data = query_model_api_raw(api_base_url, api_key, payload)
+    resp_data = query_model_api_raw(api_base_url, api_key, payload, protocol=protocol)
 
-    if resp_data and "choices" in resp_data:
-        return resp_data["choices"][0]["message"]["content"]
-    elif resp_data and "message" in resp_data:
-        return resp_data["message"]["content"]
-    else:
-        raise KognisantAPIError("Unknown model API response format.")
+    if not resp_data:
+        raise KognisantAPIError("Received empty response from model API.")
+
+    # 1. OpenAI Standard format
+    if "choices" in resp_data and len(resp_data["choices"]) > 0:
+        choice = resp_data["choices"][0]
+        if "message" in choice:
+            return choice["message"].get("content", "")
+        elif "text" in choice:  # legacy or llama.cpp completion
+            return choice.get("text", "")
+
+    # 2. Ollama Native format
+    if "message" in resp_data:
+        return resp_data["message"].get("content", "")
+
+    # 3. Llama.cpp Native /completion format
+    if "content" in resp_data:
+        return resp_data.get("content", "")
+
+    # 4. Direct text fallback
+    if isinstance(resp_data, str):
+        return resp_data
+
+    raise KognisantAPIError(
+        f"Unknown model API response format for protocol '{protocol}'."
+    )

@@ -247,97 +247,20 @@ def process_slash_commands(
             print("  ⚠️  [Warning] No AI models are currently configured.")
             return True
 
-        # Interactive inline model selection menu
-        print(f"\n  📦 {Colors.BOLD}Kognisant Model Pool Wizard:{Colors.RESET}\n")
-        for idx, m in enumerate(compiled_models, 1):
-            provider_name = m.get("provider", "Unknown")
-            display_name = m.get("display_name", m["name"])
-            is_active = (
-                f" {Colors.GREEN}[Active]{Colors.RESET}"
-                if active_model_config
-                and m["name"] == active_model_config["name"]
-                and m["provider"] == active_model_config["provider"]
-                else ""
-            )
+        # Use the unified select_model wizard directly
+        selected = select_model(
+            compiled_models,
+            label="Kognisant Model Pool Wizard",
+            active_model_config=active_model_config,
+        )
+
+        if selected and isinstance(selected, dict) and active_model_config:
+            active_model_config.clear()
+            active_model_config.update(selected)
+            set_default_model(selected)
             print(
-                f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}){is_active}"
+                f"  🔄 {Colors.GREEN}Model Switched:{Colors.RESET} Active model is now '{selected['display_name']}' ({selected['provider']}).\n"
             )
-        print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
-        print("    [Enter] Cancel and resume chat\n")
-
-        try:
-            choice = input(f"  👉 {Colors.BOLD}Enter selection: {Colors.RESET}").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return True
-
-        if not choice:
-            print("     Resuming session...\n")
-            return True
-
-        if choice.lower() == "a":
-            # Add new model on the fly
-            new_model = select_model(compiled_models)
-            if new_model and isinstance(new_model, dict) and active_model_config:
-                active_model_config.clear()
-                active_model_config.update(new_model)
-                set_default_model(new_model)
-                print(
-                    f"  🔄 {Colors.GREEN}Model Switched:{Colors.RESET} Active model is now '{new_model['display_name']}' ({new_model['provider']}).\n"
-                )
-            return True
-
-        try:
-            index = int(choice) - 1
-            if 0 <= index < len(compiled_models):
-                selected = compiled_models[index]
-
-                # Check for required API keys
-                provider_name = selected.get("provider", "")
-                api_key = selected.get("api_key", "")
-
-                if requires_api_key(provider_name, api_key):
-                    print(
-                        f"\n  🔑 {Colors.YELLOW}The provider '{provider_name}' requires an API Key.{Colors.RESET}"
-                    )
-                    try:
-                        new_key = input(
-                            f"     Please enter your {provider_name} API Key: "
-                        ).strip()
-                    except (EOFError, KeyboardInterrupt):
-                        return True
-
-                    if not new_key:
-                        print(
-                            f"     {Colors.RED}No key entered. Selection aborted.{Colors.RESET}\n"
-                        )
-                        return True
-
-                    # Save key inside the nested structures of models_pool.json
-                    providers, pool = load_providers_and_pool()
-                    if isinstance(pool, dict):
-                        for group in pool.get("selected_models", []):
-                            if group.get("provider") == provider_name:
-                                group["api_key"] = new_key
-
-                    save_providers_and_pool(providers, pool)
-                    selected["api_key"] = new_key
-                    print(
-                        f"  ✅ {Colors.GREEN}API key saved successfully!{Colors.RESET}\n"
-                    )
-
-                # In-place state swap using dict reference
-                if active_model_config:
-                    active_model_config.clear()
-                    active_model_config.update(selected)
-                    set_default_model(selected)
-                    print(
-                        f"  🔄 {Colors.GREEN}Model Switched:{Colors.RESET} Active model is now '{selected['display_name']}' ({selected['provider']}).\n"
-                    )
-                return True
-        except ValueError:
-            pass
-        print(f"     {Colors.RED}Invalid selection. Resuming chat...{Colors.RESET}\n")
         return True
 
     elif cmd == "/providers":
@@ -954,15 +877,22 @@ def run_api_chat(model_config, project_info=None):
             print(f"\n{response}\n")
 
 
-def select_model(models):
-    print(
-        f"  📦 {Colors.BOLD}Select an AI Model to power this session:{Colors.RESET}\n"
-    )
+def select_model(
+    models, label="Select an AI Model to power this session", active_model_config=None
+):
+    print(f"\n  📦 {Colors.BOLD}{label}:{Colors.RESET}\n")
     for idx, model in enumerate(models, 1):
         provider_name = model.get("provider", "Unknown")
         display_name = model.get("display_name", model["name"])
+        is_active = (
+            f" {Colors.GREEN}[Active]{Colors.RESET}"
+            if active_model_config
+            and model["name"] == active_model_config["name"]
+            and model["provider"] == active_model_config["provider"]
+            else ""
+        )
         print(
-            f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET})"
+            f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}){is_active}"
         )
     print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
     print("    [Enter] Cancel and resume chat\n")
@@ -970,9 +900,12 @@ def select_model(models):
     while True:
         try:
             choice = input(
-                f"  👉 {Colors.BOLD}Enter model number, 'a', or 'm': {Colors.RESET}"
+                f"  👉 {Colors.BOLD}Enter selection (number, 'a', or 'm'): {Colors.RESET}"
             ).strip()
         except (EOFError, KeyboardInterrupt):
+            return None
+
+        if not choice:
             return None
 
         if choice.lower() == "m":
@@ -983,56 +916,121 @@ def select_model(models):
             print(
                 f"\n  ➕ {Colors.BOLD}Add a Custom Model Configuration{Colors.RESET}\n"
             )
-            try:
-                protocol = (
-                    input(
-                        "     1. Select Protocol (openai, ollama, llama_cpp) [default: openai]: "
-                    )
-                    .strip()
-                    .lower()
-                    or "openai"
+
+            protocol = "openai"
+            provider_name = ""
+            model_name = ""
+            model_id = ""
+            api_base_url = ""
+            api_key = ""
+
+            # Ollama Auto-Discovery Shortcut
+            from .network import OLLAMA_HOST, get_ollama_models
+
+            local_ollama_tags = get_ollama_models()
+
+            if local_ollama_tags:
+                print(f"     {Colors.BOLD}Detected Local Ollama Models:{Colors.RESET}")
+                for i, tag in enumerate(local_ollama_tags, 1):
+                    print(f"       [{Colors.CYAN}{i}{Colors.RESET}] {tag}")
+                print(
+                    f"       [{Colors.YELLOW}m{Colors.RESET}] Manually enter configuration"
                 )
-                if protocol not in ("openai", "ollama", "llama_cpp"):
-                    print(
-                        f"     {Colors.RED}Unsupported protocol '{protocol}'. Using 'openai'.{Colors.RESET}"
+
+                try:
+                    sub_choice = input(
+                        f"\n     {Colors.BOLD}Select a model to auto-add or 'm': {Colors.RESET}"
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+
+                if sub_choice.lower() != "m":
+                    try:
+                        s_idx = int(sub_choice) - 1
+                        if 0 <= s_idx < len(local_ollama_tags):
+                            tag = local_ollama_tags[s_idx]
+                            # Auto-fill for Ollama
+                            protocol = "ollama"
+                            provider_name = "Ollama (Local)"
+                            model_name = tag
+                            model_id = tag
+                            api_base_url = OLLAMA_HOST
+                            api_key = ""
+
+                            # Proceed directly to saving
+                            goto_save = True
+                        else:
+                            print(
+                                f"     {Colors.RED}Invalid selection. Falling back to manual.{Colors.RESET}"
+                            )
+                            goto_save = False
+                    except ValueError:
+                        print(
+                            f"     {Colors.RED}Invalid input. Falling back to manual.{Colors.RESET}"
+                        )
+                        goto_save = False
+                else:
+                    goto_save = False
+            else:
+                goto_save = False
+
+            if not goto_save:
+                try:
+                    protocol = (
+                        input(
+                            "     1. Select Protocol (openai, ollama, llama_cpp) [default: openai]: "
+                        )
+                        .strip()
+                        .lower()
+                        or "openai"
                     )
-                    protocol = "openai"
+                    if protocol not in ("openai", "ollama", "llama_cpp"):
+                        print(
+                            f"     {Colors.RED}Unsupported protocol '{protocol}'. Using 'openai'.{Colors.RESET}"
+                        )
+                        protocol = "openai"
 
-                provider_name = input(
-                    "     2. Enter Provider Name (e.g. OpenRouter, MyLocal): "
-                ).strip()
-                if not provider_name:
-                    print(
-                        f"     {Colors.RED}Provider name cannot be empty.{Colors.RESET}\n"
-                    )
-                    continue
+                    provider_name = input(
+                        "     2. Enter Provider Name (e.g. OpenRouter, MyLocal): "
+                    ).strip()
+                    if not provider_name:
+                        print(
+                            f"     {Colors.RED}Provider name cannot be empty.{Colors.RESET}\n"
+                        )
+                        continue
 
-                model_name = input(
-                    "     3. Enter Model Display Name (e.g. Llama-3-70B): "
-                ).strip()
-                if not model_name:
-                    print(
-                        f"     {Colors.RED}Model name cannot be empty.{Colors.RESET}\n"
-                    )
-                    continue
+                    model_name = input(
+                        "     3. Enter Model Display Name (e.g. Llama-3-70B): "
+                    ).strip()
+                    if not model_name:
+                        print(
+                            f"     {Colors.RED}Model name cannot be empty.{Colors.RESET}\n"
+                        )
+                        continue
 
-                model_id = input(
-                    "     4. Enter actual Model ID string (e.g. llama3): "
-                ).strip()
-                if not model_id:
-                    print(f"     {Colors.RED}Model ID cannot be empty.{Colors.RESET}\n")
-                    continue
+                    model_id = input(
+                        "     4. Enter actual Model ID string (e.g. llama3): "
+                    ).strip()
+                    if not model_id:
+                        print(
+                            f"     {Colors.RED}Model ID cannot be empty.{Colors.RESET}\n"
+                        )
+                        continue
 
-                api_base_url = input(
-                    "     5. Enter Base URL (e.g. http://localhost:11434): "
-                ).strip()
-                if not api_base_url:
-                    print(f"     {Colors.RED}Base URL cannot be empty.{Colors.RESET}\n")
-                    continue
+                    api_base_url = input(
+                        "     5. Enter Base URL (e.g. http://localhost:11434): "
+                    ).strip()
+                    if not api_base_url:
+                        print(
+                            f"     {Colors.RED}Base URL cannot be empty.{Colors.RESET}\n"
+                        )
+                        continue
 
-                api_key = input("     6. Enter API Key (press Enter if none): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return None
+                    api_key = input(
+                        "     6. Enter API Key (press Enter if none): "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
 
             new_model = {
                 "name": model_id,

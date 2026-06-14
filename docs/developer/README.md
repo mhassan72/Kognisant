@@ -16,10 +16,10 @@ Technical documentation for Kognisant contributors and maintainers. These docume
 
 ## Quick Links
 
-- **Main README**: [`../README.md`](../README.md)
-- **User Manual**: [`../user_docs/user_manual.md`](../user_docs/user_manual.md)
-- **User Journeys**: [`../user_docs/user_journeys.md`](../user_docs/user_journeys.md)
-- **Spec (Execution Engine Hardening)**: [`../.kiro/specs/execution-engine-hardening/`](../.kiro/specs/execution-engine-hardening/)
+- **Main README**: [`../../README.md`](../../README.md)
+- **User Manual**: [`../user/user_manual.md`](../user/user_manual.md)
+- **User Journeys**: [`../user/user_journeys.md`](../user/user_journeys.md)
+- **Spec (Execution Engine Hardening)**: [`../../.kiro/specs/execution-engine-hardening/`](../../.kiro/specs/execution-engine-hardening/)
 
 ## Conventions
 

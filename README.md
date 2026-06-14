@@ -80,7 +80,9 @@ Core design goals:
 cli-kognisant/
 ├── pyproject.toml                 # Build system & project metadata
 ├── README.md                      # Project documentation
-├── developer_docs/                # In-depth technical documentation for contributors
+├── docs/                          # All project documentation
+│   ├── developer/                 # In-depth technical documentation for contributors
+│   └── user/                      # End-user documentation
 ├── cli_kognisant/
 │   ├── __init__.py                # Package version (0.1.0)
 │   ├── main.py                    # CLI entry point (argparse subcommands: init, chat, greet, spec, daemon, job)
@@ -114,9 +116,7 @@ cli-kognisant/
 │   ├── test_scripts.py            # Script CRUD & symlink protection tests
 │   ├── test_tools.py              # Workspace tool execution tests
 │   └── test_tools_handlers.py     # Agent tool handler tests (schedule, cancel, list, logs)
-└── user_docs/                     # End-user documentation
-    ├── user_manual.md
-    └── user_journeys.md
+└── .kognisant/                    # Local project configuration & history
 ```
 
 ---
@@ -259,7 +259,7 @@ Supports `*`, commas, ranges, and steps (e.g., `*/15 * * * *`). Unmatchable expr
 - PID reuse protection prevents orphan cleanup from killing unrelated processes
 - Schema versioning with forward migration ensures safe upgrades
 
-> 📖 For deep technical details on the execution engine internals, see [`developer_docs/`](developer_docs/README.md).
+> 📖 For deep technical details on the execution engine internals, see [`docs/developer/`](docs/developer/README.md).
 
 ---
 
@@ -636,15 +636,15 @@ tests/
 
 ## 📚 Developer Documentation
 
-In-depth technical documentation for contributors and maintainers lives in the [`developer_docs/`](developer_docs/) folder:
+In-depth technical documentation for contributors and maintainers lives in the [`docs/developer/`](docs/developer/) folder:
 
-- **[Architecture](developer_docs/architecture.md)** — High-level system architecture, module responsibilities, threading model, and data flow.
-- **[Execution Engine](developer_docs/execution-engine.md)** — Atomic writes, recovery decision tree, schema versioning, stream readers, FD cleanup, and clock jump handling.
-- **[Job Lifecycle](developer_docs/job-lifecycle.md)** — Job types, state machine, scheduled/persistent/agent execution flows, and graceful shutdown.
-- **[Security](developer_docs/security.md)** — Symlink containment, file permissions, root privilege warnings, and directory traversal protection.
-- **[Testing](developer_docs/testing.md)** — Test structure, fixtures, categories, and guidelines for adding new tests.
-- **[CLI Reference](developer_docs/cli-reference.md)** — Complete command reference for all daemon, job, and chat commands.
-- **[Cron Scheduling](developer_docs/cron-scheduling.md)** — CronParser internals, 5-field format, UTC evaluation, and clock jump handling.
+- **[Architecture](docs/developer/architecture.md)** — High-level system architecture, module responsibilities, threading model, and data flow.
+- **[Execution Engine](docs/developer/execution-engine.md)** — Atomic writes, recovery decision tree, schema versioning, stream readers, FD cleanup, and clock jump handling.
+- **[Job Lifecycle](docs/developer/job-lifecycle.md)** — Job types, state machine, scheduled/persistent/agent execution flows, and graceful shutdown.
+- **[Security](docs/developer/security.md)** — Symlink containment, file permissions, root privilege warnings, and directory traversal protection.
+- **[Testing](docs/developer/testing.md)** — Test structure, fixtures, categories, and guidelines for adding new tests.
+- **[CLI Reference](docs/developer/cli-reference.md)** — Complete command reference for all daemon, job, and chat commands.
+- **[Cron Scheduling](docs/developer/cron-scheduling.md)** — CronParser internals, 5-field format, UTC evaluation, and clock jump handling.
 
 ---
 

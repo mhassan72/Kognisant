@@ -28,6 +28,7 @@ cli_kognisant.egg-info/
 *.swp
 *.swo
 .DS_Store
+.kiro/
 
 # Kognisant logs and history files
 *.bak
@@ -35,3 +36,4 @@ cli_kognisant.egg-info/
 .kognisant/history/
 .kognisant/specs/*/spec.json
 .kognisant/
+

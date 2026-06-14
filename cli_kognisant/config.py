@@ -410,6 +410,28 @@ def init_global_core():
                         ],
                     },
                     {
+                        "provider": "Groq",
+                        "api_key": "your-groq-api-key-here",
+                        "models": [
+                            {
+                                "vendor": "Groq",
+                                "name": "llama-3.3-70b-versatile",
+                                "model_id": "llama-3.3-70b-versatile",
+                                "api_base_url": "https://api.groq.com/openai/v1",
+                                "pricing": {
+                                    "input_per_1m_tokens_usd": 0.59,
+                                    "output_per_1m_tokens_usd": 0.79,
+                                },
+                                "context_window": 128000,
+                                "modality": "text-to-text",
+                                "capabilities": {
+                                    "tool_calling": True,
+                                    "reasoning": True,
+                                },
+                            }
+                        ],
+                    },
+                    {
                         "provider": "Llama.cpp (Local)",
                         "api_key": "",
                         "models": [
@@ -1119,6 +1141,12 @@ def init_project():
         print("    Created persistent build context: .kognisant/context.md")
         print("    Created project memory guidelines: .kognisant/memory-guidlines.md")
         print("    Registered project inside global core registry (~/.kognisant_core/)")
+        print()
+        print(f"  {Colors.BOLD}Next steps:{Colors.RESET}")
+        print(f"    → {Colors.CYAN}kognisant chat{Colors.RESET}       Start an AI conversation about this project")
+        print(f"    → {Colors.CYAN}kognisant spec <name>{Colors.RESET} Plan a feature with requirements → design → tasks")
+        print(f"    → {Colors.CYAN}kognisant status{Colors.RESET}     Check your workspace health")
+        print()
     except Exception as e:
         print(
             f"{Colors.RED}[Error] Failed to initialize project directory: {e}{Colors.RESET}"

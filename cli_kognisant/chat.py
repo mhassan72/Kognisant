@@ -129,58 +129,91 @@ def process_slash_commands(
     cmd = parts[0].lower()
 
     if cmd == "/help":
-        width = 64
-        border = f"{Colors.CYAN}" + "─" * width + f"{Colors.RESET}"
+        # Tiered help: /help shows compact overview, /help <cmd> shows detailed info
+        help_topic = parts[1].strip().lower().lstrip("/") if len(parts) > 1 else ""
 
-        print(f"\n  ✨ {Colors.BOLD}KOGNISANT HELP MENU & SLASH COMMANDS{Colors.RESET}")
-        print(f"  {border}\n")
+        if help_topic:
+            # Detailed help for specific command
+            detailed_help = {
+                "agent": (
+                    f"  {Colors.BOLD}/agent <task>{Colors.RESET}\n\n"
+                    f"  Deploys an autonomous PERP swarm to solve complex tasks:\n"
+                    f"    Plan → Execute → Reflect → Persist\n\n"
+                    f"  Examples:\n"
+                    f"    /agent Write tests for the auth module\n"
+                    f"    /agent Refactor network.py to support streaming\n"
+                    f"    /agent Add input validation to all API endpoints\n\n"
+                    f"  The swarm reads/writes files, runs tools, and updates\n"
+                    f"  your project context automatically.\n"
+                ),
+                "spec": (
+                    f"  {Colors.BOLD}/spec <subcommand>{Colors.RESET}\n\n"
+                    f"  Manage Spec-Driven Development workflows inside chat.\n\n"
+                    f"  Subcommands:\n"
+                    f"    /spec list              Show all specs with status\n"
+                    f"    /spec <name>            Load spec context into chat\n"
+                    f"    /spec <name> run        Execute next pending task\n"
+                    f"    /spec <name> run all    Execute all remaining tasks\n"
+                    f"    /spec <name> done       Mark current task complete\n"
+                    f"    /spec <name> status     Show detailed progress\n\n"
+                    f"  Create specs from terminal: kognisant spec <name>\n"
+                ),
+                "model": (
+                    f"  {Colors.BOLD}/model{Colors.RESET}\n\n"
+                    f"  Opens the Model Pool Wizard to switch active models,\n"
+                    f"  add new providers, or update API keys mid-session.\n\n"
+                    f"  Your selection is saved as the sticky default for\n"
+                    f"  future sessions.\n"
+                ),
+                "tool": (
+                    f"  {Colors.BOLD}/tool <subcommand>{Colors.RESET}\n\n"
+                    f"  Manage globally registered custom tools.\n\n"
+                    f"  Subcommands:\n"
+                    f"    /tool list                       List all active tools\n"
+                    f"    /tool register <name> <py> [json] Register a new tool\n"
+                    f"    /tool delete <name>              Remove a global tool\n\n"
+                    f"  Tools are stored in ~/.kognisant_core/tools/ and are\n"
+                    f"  available across all projects.\n"
+                ),
+                "read": (
+                    f"  {Colors.BOLD}/read <file_path>{Colors.RESET}\n\n"
+                    f"  Loads a project file directly into conversation memory\n"
+                    f"  so the AI can see its full content.\n\n"
+                    f"  Example: /read cli_kognisant/network.py\n"
+                ),
+                "paste": (
+                    f"  {Colors.BOLD}/paste{Colors.RESET} (or {Colors.BOLD}/p{Colors.RESET})\n\n"
+                    f"  Opens multi-line paste mode for large content like\n"
+                    f"  logs, stack traces, or code blocks.\n\n"
+                    f"  Type /end on a blank line to submit.\n"
+                ),
+                "context": (
+                    f"  {Colors.BOLD}/context{Colors.RESET}\n\n"
+                    f"  Displays your project's persistent build memory\n"
+                    f"  (.kognisant/context.md). Shows current phases,\n"
+                    f"  tracked tasks, and architectural decisions.\n"
+                ),
+                "clear": (
+                    f"  {Colors.BOLD}/clear{Colors.RESET}\n\n"
+                    f"  Flushes conversation history while preserving the\n"
+                    f"  system prompt. Gives you a fresh context window.\n"
+                ),
+            }
 
-        print(f"  {Colors.BOLD}📁 Workspace & Memory:{Colors.RESET}")
-        print(
-            f"    {Colors.CYAN}/context{Colors.RESET}      - Display local project build context & active tasks (Membrain)"
-        )
-        print(
-            f"    {Colors.CYAN}/skills{Colors.RESET}       - List loaded global transferable guidelines (Core Memory)"
-        )
-        print(
-            f"    {Colors.CYAN}/files{Colors.RESET}        - List all files currently indexed in your project workspace"
-        )
-        print(
-            f"    {Colors.CYAN}/read <path>{Colors.RESET}  - Load a specific project file directly into conversational memory\n"
-        )
+            if help_topic in detailed_help:
+                print(f"\n{detailed_help[help_topic]}")
+            else:
+                print(f"  {Colors.YELLOW}No detailed help for '{help_topic}'. Available: agent, spec, model, tool, read, paste, context, clear{Colors.RESET}\n")
+            return True
 
-        print(f"  {Colors.BOLD}🤖 Model & Provider Configuration:{Colors.RESET}")
-        print(
-            f"    {Colors.CYAN}/model{Colors.RESET}        - Open the Model Pool Wizard to switch active models or register cloud endpoints"
-        )
-        print(
-            f"    {Colors.CYAN}/providers{Colors.RESET}    - Inspect all configured AI providers, keys, and model pools\n"
-        )
-
-        print(f"  {Colors.BOLD}🚀 Autonomous Multi-Agent Swarms:{Colors.RESET}")
-        print(
-            f"    {Colors.CYAN}/agent <task>{Colors.RESET} - Deploy a concurrent, self-evaluating PERP swarm (Plan, Execute, Reflect, Persist)\n"
-        )
-
-        print(f"  {Colors.BOLD}📋 Multi-Line Typing & Paste Mode:{Colors.RESET}")
-        print(
-            f"    {Colors.CYAN}/paste{Colors.RESET} (or {Colors.CYAN}/p{Colors.RESET}) - Open secure Paste Mode to paste large logs, stack traces, or code files."
-        )
-        print(
-            f"                    Type {Colors.CYAN}/end{Colors.RESET} on a new line and press Enter to submit.\n"
-        )
-
-        print(f"  {Colors.BOLD}🧹 Utilities & Sessions:{Colors.RESET}")
-        print(
-            f"    {Colors.CYAN}/clear{Colors.RESET}        - Flush active conversational logs (fresh context) while preserving system contracts"
-        )
-        print(
-            f"    {Colors.CYAN}/help{Colors.RESET}         - Display this beautiful, spacious help matrix"
-        )
-        print(
-            f"    {Colors.BOLD}exit{Colors.RESET} (or {Colors.BOLD}quit{Colors.RESET})  - Terminate active session and exit cleanly\n"
-        )
-        print(f"  {border}\n")
+        # Compact help overview
+        print(f"\n  📖 {Colors.BOLD}Commands:{Colors.RESET}\n")
+        print(f"  {Colors.BOLD}Basics{Colors.RESET}        /files  /read <path>  /context  /clear")
+        print(f"  {Colors.BOLD}AI Config{Colors.RESET}     /model  /providers")
+        print(f"  {Colors.BOLD}Power Tools{Colors.RESET}   /agent <task>  /spec  /tool")
+        print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
+        print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
+        print(f"  Type {Colors.CYAN}/help <command>{Colors.RESET} for details (e.g. /help agent)\n")
         return True
 
     elif cmd == "/clear":
@@ -370,6 +403,155 @@ def process_slash_commands(
         except Exception as ex:
             print(f"{Colors.RED}[!] Error reading file: {ex}{Colors.RESET}\n")
         return True
+
+    elif cmd == "/spec":
+        if not project_info:
+            print(
+                f"{Colors.YELLOW}[!] No active project detected. Run 'kognisant init' first.{Colors.RESET}\n"
+            )
+            return True
+
+        subparts = parts[1].split() if len(parts) > 1 else []
+        subcmd = subparts[0].lower() if subparts else "help"
+
+        if subcmd == "help":
+            print(f"\n  📋 {Colors.BOLD}KOGNISANT SPEC COMMANDS{Colors.RESET}")
+            print(
+                f"  {Colors.CYAN}────────────────────────────────────────────────{Colors.RESET}"
+            )
+            print(
+                f"    {Colors.BOLD}/spec list{Colors.RESET}              - Show all specs with status"
+            )
+            print(
+                f"    {Colors.BOLD}/spec <name>{Colors.RESET}            - Load spec context into chat"
+            )
+            print(
+                f"    {Colors.BOLD}/spec <name> run{Colors.RESET}        - Execute next pending task"
+            )
+            print(
+                f"    {Colors.BOLD}/spec <name> run all{Colors.RESET}    - Execute all remaining tasks"
+            )
+            print(
+                f"    {Colors.BOLD}/spec <name> done{Colors.RESET}       - Mark current task complete"
+            )
+            print(
+                f"    {Colors.BOLD}/spec <name> status{Colors.RESET}     - Show detailed progress"
+            )
+            print(
+                f"  {Colors.CYAN}────────────────────────────────────────────────{Colors.RESET}\n"
+            )
+            return True
+
+        elif subcmd == "list":
+            from .sdd import get_all_specs_status
+
+            specs = get_all_specs_status(project_info["root"])
+            if not specs:
+                print(
+                    f"  {Colors.YELLOW}No specs found. Create one with 'kognisant spec <name>' from terminal.{Colors.RESET}\n"
+                )
+                return True
+            print(f"\n  {Colors.BOLD}Feature Specifications:{Colors.RESET}\n")
+            for s in specs:
+                name = s["name"]
+                status = s["status"]
+                done = s["tasks_done"]
+                total = s["tasks_total"]
+                if status == "DONE":
+                    status_display = f"{Colors.GREEN}{status}{Colors.RESET}"
+                elif status == "BUILD":
+                    status_display = f"{Colors.YELLOW}{status}{Colors.RESET}"
+                else:
+                    status_display = f"{Colors.CYAN}{status}{Colors.RESET}"
+                progress = f"({done}/{total})" if total > 0 else ""
+                print(f"    {Colors.CYAN}{name}{Colors.RESET}  {status_display} {progress}")
+            print()
+            return True
+
+        else:
+            # /spec <name> [action]
+            spec_name = subcmd
+            action = subparts[1].lower() if len(subparts) > 1 else "load"
+            run_all = len(subparts) > 2 and subparts[2].lower() == "all"
+
+            from .sdd import SpecManager, run_build_next_task
+
+            spec = SpecManager(project_info["root"], spec_name)
+            state = spec.load()
+
+            if not state:
+                print(
+                    f"  {Colors.YELLOW}Spec '{spec_name}' not found. Create it with 'kognisant spec {spec_name}' from terminal.{Colors.RESET}\n"
+                )
+                return True
+
+            if action == "status":
+                done, total = spec.get_progress()
+                status = state.get("status", "UNKNOWN")
+                print(f"\n  🛠️  {Colors.BOLD}Spec: {spec_name}{Colors.RESET}")
+                print(f"  Status: {Colors.CYAN}{status}{Colors.RESET} ({done}/{total} tasks)")
+                tasks = spec.get_tasks()
+                if tasks:
+                    for task in tasks:
+                        check = f"{Colors.GREEN}✓{Colors.RESET}" if task.get("status") == "done" else "□"
+                        print(f"    {check} {task['description']}")
+                print()
+                return True
+
+            elif action == "run":
+                compiled_models = get_compiled_models()
+                if run_all:
+                    # Execute all remaining tasks
+                    while True:
+                        idx, task = spec.get_next_task()
+                        if idx is None:
+                            print(f"  ✅ {Colors.GREEN}All spec tasks completed!{Colors.RESET}\n")
+                            spec.advance_status("VERIFY")
+                            break
+                        run_build_next_task(
+                            spec,
+                            model_config=active_model_config,
+                            project_info=project_info,
+                            compiled_models=compiled_models,
+                        )
+                else:
+                    run_build_next_task(
+                        spec,
+                        model_config=active_model_config,
+                        project_info=project_info,
+                        compiled_models=compiled_models,
+                    )
+                return True
+
+            elif action == "done":
+                idx, task = spec.get_next_task()
+                if idx is not None:
+                    spec.mark_task_done(idx)
+                    done, total = spec.get_progress()
+                    print(f"  ✅ Marked task done: '{task['description']}'")
+                    print(f"  📊 Progress: {done}/{total}\n")
+                else:
+                    print(f"  {Colors.GREEN}All tasks already completed!{Colors.RESET}\n")
+                return True
+
+            else:
+                # Default: load spec context into chat session
+                spec_context = spec.get_spec_context_for_agent()
+                if isinstance(messages_or_history, list) and (
+                    not messages_or_history or isinstance(messages_or_history[0], dict)
+                ):
+                    messages_or_history.append(
+                        {
+                            "role": "system",
+                            "content": f"[Loaded spec context for feature '{spec_name}']\n{spec_context}",
+                        }
+                    )
+                done, total = spec.get_progress()
+                print(
+                    f"  📋 {Colors.GREEN}Spec '{spec_name}' loaded into context.{Colors.RESET} "
+                    f"({state.get('status', '?')} — {done}/{total} tasks)\n"
+                )
+                return True
 
     elif cmd == "/agent":
         if not project_info:
@@ -589,16 +771,19 @@ def process_slash_commands(
 
 
 def run_mock_chat(project_info=None):
-    print(f"\n{Colors.BOLD}--- Starting Mock Chat (Offline) ---{Colors.RESET}")
+    print(f"\n{Colors.BOLD}--- Offline Mode (No AI Model Connected) ---{Colors.RESET}")
     if project_info:
         print(
             f"📁 {Colors.CYAN}Project Mode Active:{Colors.RESET} {project_info['name']}"
         )
-        print(
-            f"  🧠 {Colors.GREEN}Membrain Active:{Colors.RESET} Loaded '.kognisant/context.md' and '.kognisant/memory-guidlines.md' steering rules into conversation context."
-        )
-    print(f"Type {Colors.CYAN}/help{Colors.RESET} to see available commands.")
-    print("Press Ctrl+D (Cmd+D) or Ctrl+C to exit.\n")
+    print(
+        f"  {Colors.YELLOW}ℹ️  Responses are simulated. Slash commands still work.{Colors.RESET}"
+    )
+    print(
+        f"  To connect a model: type {Colors.CYAN}/model{Colors.RESET} or run {Colors.CYAN}kognisant setup{Colors.RESET}\n"
+    )
+    print(f"  Quick commands: {Colors.CYAN}/help{Colors.RESET}  {Colors.CYAN}/files{Colors.RESET}  {Colors.CYAN}/context{Colors.RESET}  {Colors.CYAN}/model{Colors.RESET}")
+    print("  Press Ctrl+D or Ctrl+C to exit.\n")
 
     history = []
     session_file = (
@@ -609,7 +794,7 @@ def run_mock_chat(project_info=None):
         try:
             user_input = prompt_boxed_input()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n{Colors.YELLOW}Goodbye! Thanks for chatting.{Colors.RESET}")
+            print(f"\n{Colors.YELLOW}Goodbye!{Colors.RESET}")
             break
 
         cleaned_input = user_input.strip()
@@ -632,14 +817,23 @@ def run_mock_chat(project_info=None):
 
         spinner = Spinner()
         spinner.start()
-        time.sleep(1.0)
+        time.sleep(0.6)
         spinner.stop()
 
         turn_count = len(history)
         if turn_count == 1:
-            response = f"Hello! It's nice to meet you. You said: '{cleaned_input}'."
+            response = (
+                f"I'm in offline mode right now, so I can't actually process your request.\n\n"
+                f"To get AI-powered responses, connect a model:\n"
+                f"  • Type `/model` to configure one now\n"
+                f"  • Or run `kognisant setup` from your terminal\n\n"
+                f"In the meantime, slash commands like `/files`, `/context`, and `/spec list` still work!"
+            )
         else:
-            response = f"Understood. We are on turn {turn_count} of our chat. You previously mentioned: '{history[-2]}'. What's next?"
+            response = (
+                f"Still in offline mode. Your message was logged (turn {turn_count}).\n\n"
+                f"Type `/model` to connect an AI model, or `/help` for available commands."
+            )
 
         print(f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(response)}\n")
 
@@ -661,6 +855,10 @@ def run_api_chat(model_config, project_info=None):
             f"  🧠 {Colors.GREEN}Membrain Active:{Colors.RESET} Loaded '.kognisant/context.md' and '.kognisant/memory-guidlines.md' steering rules into conversation context."
         )
     print(f"Type {Colors.CYAN}/help{Colors.RESET} to see available commands.")
+    print(
+        f"  💡 Quick: {Colors.CYAN}/files{Colors.RESET}  {Colors.CYAN}/read <path>{Colors.RESET}  "
+        f"{Colors.CYAN}/agent <task>{Colors.RESET}  {Colors.CYAN}/spec list{Colors.RESET}  {Colors.CYAN}/model{Colors.RESET}"
+    )
     print("Press Ctrl+D (Cmd+D) or Ctrl+C to exit.\n")
 
     messages = []
@@ -859,12 +1057,45 @@ def run_api_chat(model_config, project_info=None):
             save_chat_session(project_info, messages, session_file)
 
             # Format and surface friendly, human-readable error messages
+            err_str = str(e)
             if isinstance(e, KognisantAPIError):
-                response = (
-                    f"{Colors.RED}[Error] API Transport Failure: {e}{Colors.RESET}"
-                )
+                if "401" in err_str:
+                    response = (
+                        f"\n  {Colors.RED}⚠️  API key was rejected (HTTP 401).{Colors.RESET}\n\n"
+                        f"  To fix this:\n"
+                        f"    1. Verify your API key is correct\n"
+                        f"    2. Type {Colors.CYAN}/model{Colors.RESET} to update your key\n"
+                        f"    3. Or switch to a different model\n"
+                    )
+                elif "429" in err_str:
+                    response = (
+                        f"\n  {Colors.YELLOW}⚠️  Rate limited (HTTP 429). Too many requests.{Colors.RESET}\n\n"
+                        f"  Wait a moment and try again, or switch to a different model with {Colors.CYAN}/model{Colors.RESET}\n"
+                    )
+                elif "Connection" in err_str or "URLError" in err_str or "timeout" in err_str.lower():
+                    response = (
+                        f"\n  {Colors.RED}⚠️  Cannot reach the model endpoint.{Colors.RESET}\n\n"
+                        f"  Possible fixes:\n"
+                        f"    • Check your internet connection\n"
+                        f"    • If using Ollama: ensure it's running ({Colors.CYAN}ollama serve{Colors.RESET})\n"
+                        f"    • If using Llama.cpp: ensure the server is started\n"
+                        f"    • Type {Colors.CYAN}/model{Colors.RESET} to switch providers\n"
+                    )
+                elif "malformed" in err_str.lower() or "parse" in err_str.lower():
+                    response = (
+                        f"\n  {Colors.YELLOW}⚠️  Received an invalid response from the model.{Colors.RESET}\n\n"
+                        f"  This sometimes happens with local models. Try again or switch models with {Colors.CYAN}/model{Colors.RESET}\n"
+                    )
+                else:
+                    response = (
+                        f"\n  {Colors.RED}⚠️  API Error: {err_str}{Colors.RESET}\n\n"
+                        f"  Your conversation was rolled back. Try again or type {Colors.CYAN}/model{Colors.RESET} to switch.\n"
+                    )
             else:
-                response = f"{Colors.RED}[Error] Failed to get response from model: {e}\nPlease ensure the API endpoint is fully reachable.{Colors.RESET}"
+                response = (
+                    f"\n  {Colors.RED}⚠️  Unexpected error: {err_str}{Colors.RESET}\n\n"
+                    f"  Your conversation was rolled back safely. Try again.\n"
+                )
             success = False
         finally:
             spinner.stop()
@@ -884,6 +1115,7 @@ def select_model(
     for idx, model in enumerate(models, 1):
         provider_name = model.get("provider", "Unknown")
         display_name = model.get("display_name", model["name"])
+        api_key = model.get("api_key", "")
         is_active = (
             f" {Colors.GREEN}[Active]{Colors.RESET}"
             if active_model_config
@@ -891,8 +1123,18 @@ def select_model(
             and model["provider"] == active_model_config["provider"]
             else ""
         )
+
+        # Health status indicator
+        is_local = "ollama" in provider_name.lower() or "llama" in provider_name.lower()
+        if is_local:
+            health = f"{Colors.GREEN}🟢{Colors.RESET}"
+        elif api_key and "your-" not in api_key:
+            health = f"{Colors.GREEN}🟢{Colors.RESET}"
+        else:
+            health = f"{Colors.YELLOW}🟡{Colors.RESET}"
+
         print(
-            f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}){is_active}"
+            f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}) {health}{is_active}"
         )
     print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
     print("    [Enter] Cancel and resume chat\n")
@@ -912,177 +1154,116 @@ def select_model(
             return "mock"
 
         if choice.lower() == "a":
-            # Add custom model interactively
+            # Template-based provider addition
             print(
-                f"\n  ➕ {Colors.BOLD}Add a Custom Model Configuration{Colors.RESET}\n"
+                f"\n  ➕ {Colors.BOLD}Add a Provider:{Colors.RESET}\n"
             )
+            print(f"    [{Colors.CYAN}1{Colors.RESET}] Ollama (local, auto-detect)")
+            print(f"    [{Colors.CYAN}2{Colors.RESET}] OpenAI")
+            print(f"    [{Colors.CYAN}3{Colors.RESET}] Groq")
+            print(f"    [{Colors.CYAN}4{Colors.RESET}] DeepSeek")
+            print(f"    [{Colors.CYAN}5{Colors.RESET}] OpenRouter")
+            print(f"    [{Colors.CYAN}6{Colors.RESET}] Custom endpoint\n")
 
-            protocol = "openai"
-            provider_name = ""
-            model_name = ""
-            model_id = ""
-            api_base_url = ""
-            api_key = ""
+            try:
+                provider_choice = input(f"     Select [1-6]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
 
-            # Ollama Auto-Discovery Shortcut
-            from .network import OLLAMA_HOST, get_ollama_models
+            # Provider templates: (name, base_url, protocol, needs_key, default_model)
+            provider_templates = {
+                "1": ("Ollama (Local)", "http://localhost:11434", "ollama", False, None),
+                "2": ("OpenAI", "https://api.openai.com/v1", "openai", True, "gpt-4o-mini"),
+                "3": ("Groq", "https://api.groq.com/openai/v1", "openai", True, "llama-3.3-70b-versatile"),
+                "4": ("DeepSeek", "https://api.deepseek.com/v1", "openai", True, "deepseek-chat"),
+                "5": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", True, "meta-llama/llama-3.3-70b-instruct"),
+                "6": None,
+            }
 
-            local_ollama_tags = get_ollama_models()
+            if provider_choice not in provider_templates:
+                print(f"     {Colors.RED}Invalid choice.{Colors.RESET}\n")
+                continue
 
-            if local_ollama_tags:
-                print(f"     {Colors.BOLD}Detected Local Ollama Models:{Colors.RESET}")
-                for i, tag in enumerate(local_ollama_tags, 1):
-                    print(f"       [{Colors.CYAN}{i}{Colors.RESET}] {tag}")
-                print(
-                    f"       [{Colors.YELLOW}m{Colors.RESET}] Manually enter configuration"
-                )
+            template = provider_templates[provider_choice]
 
-                try:
-                    sub_choice = input(
-                        f"\n     {Colors.BOLD}Select a model to auto-add or 'm': {Colors.RESET}"
-                    ).strip()
-                except (EOFError, KeyboardInterrupt):
-                    return None
+            if provider_choice == "1":
+                # Ollama auto-detect
+                from .network import OLLAMA_HOST, get_ollama_models
 
-                if sub_choice.lower() != "m":
+                local_tags = get_ollama_models()
+                if local_tags:
+                    print(f"\n     {Colors.GREEN}Detected {len(local_tags)} model(s):{Colors.RESET}")
+                    for i, tag in enumerate(local_tags[:10], 1):
+                        print(f"       [{Colors.CYAN}{i}{Colors.RESET}] {tag}")
                     try:
-                        s_idx = int(sub_choice) - 1
-                        if 0 <= s_idx < len(local_ollama_tags):
-                            tag = local_ollama_tags[s_idx]
-                            # Auto-fill for Ollama
-                            protocol = "ollama"
-                            provider_name = "Ollama (Local)"
-                            model_name = tag
-                            model_id = tag
-                            api_base_url = OLLAMA_HOST
-                            api_key = ""
+                        sel = input(f"\n     Select model: ").strip()
+                        s_idx = int(sel) - 1
+                        tag = local_tags[s_idx] if 0 <= s_idx < len(local_tags) else local_tags[0]
+                    except (ValueError, EOFError, KeyboardInterrupt):
+                        tag = local_tags[0]
 
-                            # Proceed directly to saving
-                            goto_save = True
-                        else:
-                            print(
-                                f"     {Colors.RED}Invalid selection. Falling back to manual.{Colors.RESET}"
-                            )
-                            goto_save = False
-                    except ValueError:
-                        print(
-                            f"     {Colors.RED}Invalid input. Falling back to manual.{Colors.RESET}"
-                        )
-                        goto_save = False
+                    new_model = {
+                        "name": tag,
+                        "display_name": tag,
+                        "provider": "Ollama (Local)",
+                        "protocol": "ollama",
+                        "api_base_url": OLLAMA_HOST,
+                        "api_key": "",
+                        "capabilities": {"tool_calling": True, "reasoning": True},
+                    }
                 else:
-                    goto_save = False
-            else:
-                goto_save = False
+                    print(f"     {Colors.RED}Ollama not reachable at localhost:11434.{Colors.RESET}\n")
+                    continue
 
-            if not goto_save:
+            elif provider_choice == "6":
+                # Custom endpoint
                 try:
-                    protocol = (
-                        input(
-                            "     1. Select Protocol (openai, ollama, llama_cpp) [default: openai]: "
-                        )
-                        .strip()
-                        .lower()
-                        or "openai"
-                    )
-                    if protocol not in ("openai", "ollama", "llama_cpp"):
-                        print(
-                            f"     {Colors.RED}Unsupported protocol '{protocol}'. Using 'openai'.{Colors.RESET}"
-                        )
-                        protocol = "openai"
-
-                    provider_name = input(
-                        "     2. Enter Provider Name (e.g. OpenRouter, MyLocal): "
-                    ).strip()
-                    if not provider_name:
-                        print(
-                            f"     {Colors.RED}Provider name cannot be empty.{Colors.RESET}\n"
-                        )
-                        continue
-
-                    model_name = input(
-                        "     3. Enter Model Display Name (e.g. Llama-3-70B): "
-                    ).strip()
-                    if not model_name:
-                        print(
-                            f"     {Colors.RED}Model name cannot be empty.{Colors.RESET}\n"
-                        )
-                        continue
-
-                    model_id = input(
-                        "     4. Enter actual Model ID string (e.g. llama3): "
-                    ).strip()
-                    if not model_id:
-                        print(
-                            f"     {Colors.RED}Model ID cannot be empty.{Colors.RESET}\n"
-                        )
-                        continue
-
-                    api_base_url = input(
-                        "     5. Enter Base URL (e.g. http://localhost:11434): "
-                    ).strip()
-                    if not api_base_url:
-                        print(
-                            f"     {Colors.RED}Base URL cannot be empty.{Colors.RESET}\n"
-                        )
-                        continue
-
-                    api_key = input(
-                        "     6. Enter API Key (press Enter if none): "
-                    ).strip()
+                    provider_name = input("     Provider name: ").strip()
+                    api_base_url = input("     Base URL: ").strip()
+                    model_id = input("     Model ID: ").strip()
+                    api_key = input("     API Key (Enter if none): ").strip()
                 except (EOFError, KeyboardInterrupt):
                     return None
 
-            new_model = {
-                "name": model_id,
-                "display_name": model_name,
-                "provider": provider_name,
-                "protocol": protocol,
-                "api_base_url": api_base_url,
-                "api_key": api_key,
-                "capabilities": {"tool_calling": True, "reasoning": True},
-            }
+                if not api_base_url or not model_id:
+                    print(f"     {Colors.RED}URL and Model ID required.{Colors.RESET}\n")
+                    continue
 
-            # Save newly added model globally inside hierarchical models_pool.json
-            providers, pool = load_providers_and_pool()
-            selected_models = []
-            if isinstance(pool, dict):
-                selected_models = pool.get("selected_models", [])
-                if not isinstance(selected_models, list):
-                    selected_models = []
-
-            # Find if provider already exists in selected_models
-            provider_group = None
-            for group in selected_models:
-                if group.get("provider") == provider_name:
-                    provider_group = group
-                    break
-
-            new_m_dict = {
-                "vendor": provider_name,
-                "name": model_name,
-                "model_id": model_id,
-                "protocol": protocol,
-                "api_base_url": api_base_url,
-                "capabilities": {"tool_calling": True, "reasoning": True},
-            }
-
-            if not provider_group:
-                provider_group = {
-                    "provider": provider_name,
+                new_model = {
+                    "name": model_id,
+                    "display_name": model_id,
+                    "provider": provider_name or "Custom",
+                    "protocol": "openai",
+                    "api_base_url": api_base_url,
                     "api_key": api_key,
-                    "models": [new_m_dict],
+                    "capabilities": {"tool_calling": True, "reasoning": True},
                 }
-                selected_models.append(provider_group)
             else:
-                if api_key:
-                    provider_group["api_key"] = api_key
-                provider_group["models"].append(new_m_dict)
+                # Template-based cloud provider (just need API key)
+                prov_name, base_url, protocol, _, default_model = template
+                try:
+                    api_key = input(f"     🔑 {prov_name} API Key: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
 
-            pool["selected_models"] = selected_models
-            save_providers_and_pool(providers, pool)
+                if not api_key:
+                    print(f"     {Colors.RED}No key provided.{Colors.RESET}\n")
+                    continue
 
+                new_model = {
+                    "name": default_model,
+                    "display_name": default_model,
+                    "provider": prov_name,
+                    "protocol": protocol,
+                    "api_base_url": base_url,
+                    "api_key": api_key,
+                    "capabilities": {"tool_calling": True, "reasoning": True},
+                }
+
+            # Save the model
+            _save_setup_model(new_model, new_model["provider"], new_model.get("api_key", ""))
             print(
-                f"\n  ✅ {Colors.GREEN}Model '{model_name}' successfully added and saved globally!{Colors.RESET}\n"
+                f"\n  ✅ {Colors.GREEN}'{new_model['display_name']}' ({new_model['provider']}) added and saved!{Colors.RESET}\n"
             )
             return new_model
 
@@ -1131,6 +1312,253 @@ def select_model(
         )
 
 
+def _has_any_valid_provider():
+    """Check if at least one provider has a usable key or is a local endpoint."""
+    compiled_models = get_compiled_models()
+    for model in compiled_models:
+        provider = model.get("provider", "")
+        api_key = model.get("api_key", "")
+        # Local models don't need keys
+        if "ollama" in provider.lower() or "llama" in provider.lower():
+            return True
+        # Cloud models need a real key
+        if api_key and "your-" not in api_key:
+            return True
+    return False
+
+
+def _run_first_time_setup():
+    """Interactive first-run setup wizard for configuring a provider."""
+    print(f"  ╭{'─' * 48}╮")
+    print(f"  │  👋 {Colors.BOLD}Welcome to Kognisant!{Colors.RESET}                       │")
+    print(f"  │  Let's get you connected to an AI model.      │")
+    print(f"  ╰{'─' * 48}╯\n")
+
+    print(f"  How would you like to connect?\n")
+    print(f"    [{Colors.CYAN}1{Colors.RESET}] 🏠 Local Model (Ollama)        — Free, private, runs on your machine")
+    print(f"    [{Colors.CYAN}2{Colors.RESET}] 🏠 Local Model (Llama.cpp)     — Free, point to a running server")
+    print(f"    [{Colors.CYAN}3{Colors.RESET}] ☁️  Cloud API (OpenAI)          — Requires API key")
+    print(f"    [{Colors.CYAN}4{Colors.RESET}] ☁️  Cloud API (Groq)            — Requires API key, fast inference")
+    print(f"    [{Colors.CYAN}5{Colors.RESET}] ☁️  Cloud API (DeepSeek)        — Requires API key, affordable")
+    print(f"    [{Colors.CYAN}6{Colors.RESET}] ☁️  Cloud API (Custom endpoint) — Any OpenAI-compatible server")
+    print(f"    [{Colors.CYAN}7{Colors.RESET}] 🔌 Skip — I'll configure later (offline mock mode)\n")
+
+    try:
+        choice = input(f"  👉 {Colors.BOLD}Select [1-7]:{Colors.RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if choice == "7" or not choice:
+        return "mock"
+
+    # Provider templates: (provider_name, api_base_url, protocol, needs_key, default_model_name, default_model_id)
+    templates = {
+        "1": ("Ollama (Local)", "http://localhost:11434", "ollama", False, None, None),
+        "2": ("Llama.cpp (Local)", "http://localhost:8080", "llama_cpp", False, "local-model", "local-model"),
+        "3": ("OpenAI", "https://api.openai.com/v1", "openai", True, "gpt-4o-mini", "gpt-4o-mini"),
+        "4": ("Groq", "https://api.groq.com/openai/v1", "openai", True, "llama-3.3-70b-versatile", "llama-3.3-70b-versatile"),
+        "5": ("DeepSeek", "https://api.deepseek.com/v1", "openai", True, "deepseek-chat", "deepseek-chat"),
+        "6": None,  # Custom
+    }
+
+    if choice not in templates:
+        print(f"  {Colors.YELLOW}Invalid selection. Starting in offline mode.{Colors.RESET}\n")
+        return "mock"
+
+    template = templates[choice]
+
+    if choice == "6":
+        # Custom endpoint flow
+        try:
+            print(f"\n  ➕ {Colors.BOLD}Custom OpenAI-Compatible Endpoint{Colors.RESET}\n")
+            api_base_url = input("     Base URL (e.g. https://api.example.com/v1): ").strip()
+            if not api_base_url:
+                print(f"  {Colors.RED}URL required.{Colors.RESET}\n")
+                return "mock"
+            model_id = input("     Model ID (e.g. my-model-name): ").strip()
+            if not model_id:
+                print(f"  {Colors.RED}Model ID required.{Colors.RESET}\n")
+                return "mock"
+            api_key = input("     API Key (Enter if none): ").strip()
+            provider_name = input("     Provider name (e.g. MyServer) [Custom]: ").strip() or "Custom"
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        new_model = {
+            "name": model_id,
+            "display_name": model_id,
+            "provider": provider_name,
+            "protocol": "openai",
+            "api_base_url": api_base_url,
+            "api_key": api_key,
+            "capabilities": {"tool_calling": True, "reasoning": True},
+        }
+        _save_setup_model(new_model, provider_name, api_key)
+        return new_model
+
+    provider_name, api_base_url, protocol, needs_key, default_name, default_id = template
+
+    # Ollama: auto-detect models
+    if choice == "1":
+        from .network import get_ollama_models
+
+        print(f"\n  ⏳ Detecting Ollama models at localhost:11434...")
+        models = get_ollama_models()
+        if models:
+            print(f"  {Colors.GREEN}✅ Ollama detected! {len(models)} model(s) available:{Colors.RESET}\n")
+            for i, m in enumerate(models[:10], 1):
+                print(f"    [{Colors.CYAN}{i}{Colors.RESET}] {m}")
+            print()
+            try:
+                sel = input(f"  👉 Select model [1-{min(len(models), 10)}]: ").strip()
+                idx = int(sel) - 1
+                if 0 <= idx < len(models):
+                    selected_model_name = models[idx]
+                else:
+                    selected_model_name = models[0]
+            except (ValueError, EOFError, KeyboardInterrupt):
+                selected_model_name = models[0]
+
+            new_model = {
+                "name": selected_model_name,
+                "display_name": selected_model_name,
+                "provider": "Ollama (Local)",
+                "protocol": "ollama",
+                "api_base_url": "http://localhost:11434",
+                "api_key": "",
+                "capabilities": {"tool_calling": True, "reasoning": True},
+            }
+            _save_setup_model(new_model, "Ollama (Local)", "")
+            print(f"  ✅ {Colors.GREEN}Saved! Ollama ({selected_model_name}) is now your active model.{Colors.RESET}\n")
+            return new_model
+        else:
+            print(f"  {Colors.RED}❌ Could not reach Ollama at localhost:11434.{Colors.RESET}")
+            print(f"     Make sure Ollama is running: {Colors.CYAN}ollama serve{Colors.RESET}")
+            print(f"     Then restart: {Colors.CYAN}kognisant chat{Colors.RESET}\n")
+            return "mock"
+
+    # Llama.cpp: ask for URL
+    if choice == "2":
+        try:
+            print(f"\n  🏠 {Colors.BOLD}Llama.cpp Server{Colors.RESET}\n")
+            url = input(f"     Server URL [{api_base_url}]: ").strip() or api_base_url
+            model_name = input(f"     Model name [local-model]: ").strip() or "local-model"
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        new_model = {
+            "name": model_name,
+            "display_name": model_name,
+            "provider": "Llama.cpp (Local)",
+            "protocol": "llama_cpp",
+            "api_base_url": url,
+            "api_key": "",
+            "capabilities": {"tool_calling": False, "reasoning": True},
+        }
+        _save_setup_model(new_model, "Llama.cpp (Local)", "")
+        print(f"  ✅ {Colors.GREEN}Saved! Llama.cpp ({model_name}) is now your active model.{Colors.RESET}\n")
+        return new_model
+
+    # Cloud providers: ask for API key
+    try:
+        print(f"\n  ☁️  {Colors.BOLD}{provider_name} Setup{Colors.RESET}\n")
+        api_key = input(f"     🔑 Enter your {provider_name} API key: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if not api_key:
+        print(f"  {Colors.YELLOW}No key provided. Starting in offline mode.{Colors.RESET}\n")
+        return "mock"
+
+    # Validate connection
+    print(f"  ⏳ Testing connection to {provider_name}...")
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    try:
+        test_url = api_base_url.rstrip("/") + "/models"
+        req = urllib.request.Request(test_url)
+        req.add_header("Authorization", f"Bearer {api_key}")
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=5.0, context=context) as resp:
+            if resp.status == 200:
+                print(f"  {Colors.GREEN}✅ Connected successfully!{Colors.RESET}\n")
+            else:
+                print(f"  {Colors.YELLOW}⚠️  Got HTTP {resp.status}. Saving anyway.{Colors.RESET}\n")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print(f"  {Colors.RED}❌ Invalid API key (HTTP 401). Please check your key.{Colors.RESET}")
+            retry = input(f"     Save anyway? [y/n]: ").strip().lower()
+            if retry != "y":
+                return "mock"
+        else:
+            print(f"  {Colors.YELLOW}⚠️  HTTP {e.code}. Saving config anyway.{Colors.RESET}\n")
+    except Exception as e:
+        print(f"  {Colors.YELLOW}⚠️  Connection test failed: {e}. Saving config anyway.{Colors.RESET}\n")
+
+    new_model = {
+        "name": default_id,
+        "display_name": default_name,
+        "provider": provider_name,
+        "protocol": protocol,
+        "api_base_url": api_base_url,
+        "api_key": api_key,
+        "capabilities": {"tool_calling": True, "reasoning": True},
+    }
+    _save_setup_model(new_model, provider_name, api_key)
+    print(f"  ✅ {Colors.GREEN}Saved! {provider_name} ({default_name}) is now your active model.{Colors.RESET}\n")
+    return new_model
+
+
+def _save_setup_model(model_config, provider_name, api_key):
+    """Persist a model from setup wizard into the global models_pool.json."""
+    providers, pool = load_providers_and_pool()
+    if not isinstance(pool, dict):
+        pool = {"selected_models": []}
+
+    selected_models = pool.get("selected_models", [])
+    if not isinstance(selected_models, list):
+        selected_models = []
+
+    # Find existing provider group or create new one
+    provider_group = None
+    for group in selected_models:
+        if group.get("provider") == provider_name:
+            provider_group = group
+            break
+
+    new_model_entry = {
+        "vendor": provider_name,
+        "name": model_config.get("display_name", model_config["name"]),
+        "model_id": model_config["name"],
+        "protocol": model_config.get("protocol", "openai"),
+        "api_base_url": model_config["api_base_url"],
+        "capabilities": model_config.get("capabilities", {"tool_calling": True, "reasoning": True}),
+    }
+
+    if not provider_group:
+        provider_group = {
+            "provider": provider_name,
+            "api_key": api_key,
+            "models": [new_model_entry],
+        }
+        selected_models.append(provider_group)
+    else:
+        if api_key:
+            provider_group["api_key"] = api_key
+        # Don't duplicate if model already exists
+        existing_ids = [m.get("model_id") for m in provider_group.get("models", [])]
+        if model_config["name"] not in existing_ids:
+            provider_group["models"].append(new_model_entry)
+
+    pool["selected_models"] = selected_models
+    save_providers_and_pool(providers, pool)
+
+    # Set as default
+    set_default_model(model_config)
+
+
 def chat_flow():
     # Initialize global registry folder dynamically
     from .config import init_global_core
@@ -1148,21 +1576,77 @@ def chat_flow():
     project_info = get_project_info()
     if project_info:
         print(
-            f"  📁 {Colors.BOLD}Workspace:{Colors.RESET} {project_info['root']} ({Colors.GREEN}Active{Colors.RESET})\n"
+            f"  📁 {Colors.BOLD}Workspace:{Colors.RESET} {project_info['root']} ({Colors.GREEN}Active{Colors.RESET})"
         )
+        # Session continuity cues
+        context_path = os.path.join(project_info["root"], ".kognisant", "context.md")
+        history_dir = os.path.join(project_info["root"], ".kognisant", "history")
+        if os.path.exists(context_path):
+            try:
+                with open(context_path, "r", encoding="utf-8") as f:
+                    ctx = f.read()
+                # Count tracked phases/tasks
+                task_count = ctx.count("- [x]") + ctx.count("- [ ]")
+                done_count = ctx.count("- [x]")
+                if task_count > 0:
+                    print(f"  🧠 Membrain loaded (context.md: {done_count}/{task_count} tasks tracked)")
+                else:
+                    print(f"  🧠 Membrain loaded")
+            except Exception:
+                pass
+
+        if os.path.exists(history_dir):
+            try:
+                sessions = sorted(
+                    [f for f in os.listdir(history_dir) if f.endswith(".json")],
+                    reverse=True,
+                )
+                if sessions:
+                    latest = sessions[0]
+                    latest_path = os.path.join(history_dir, latest)
+                    mtime = os.path.getmtime(latest_path)
+                    elapsed = time.time() - mtime
+                    if elapsed < 3600:
+                        ago = f"{int(elapsed // 60)} minutes ago"
+                    elif elapsed < 86400:
+                        ago = f"{int(elapsed // 3600)} hours ago"
+                    else:
+                        ago = f"{int(elapsed // 86400)} days ago"
+                    print(f"  🕐 Last session: {ago}")
+            except Exception:
+                pass
+        print()
     else:
         print(
             f"  📂 {Colors.BOLD}Workspace:{Colors.RESET} {Colors.YELLOW}No active workspace.{Colors.RESET} (Run 'kognisant init' to enable persistent build context)\n"
         )
 
-    # Compile the explicit models pool list (no dynamic local-tag injection)
+    # Check if this is a first-run scenario (no valid providers configured)
     compiled_models = get_compiled_models()
+    if not _has_any_valid_provider():
+        # First-run setup wizard
+        result = _run_first_time_setup()
+        if result is None:
+            print(f"\n  {Colors.YELLOW}Goodbye!{Colors.RESET}\n")
+            return
+        elif result == "mock":
+            run_mock_chat(project_info)
+            return
+        else:
+            # Refresh compiled models after setup
+            compiled_models = get_compiled_models()
+            run_api_chat(result, project_info)
+            return
 
     if not compiled_models:
         print(
-            f"  ⚠️  {Colors.YELLOW}No AI models are currently configured or available.{Colors.RESET}"
+            f"  ℹ️  {Colors.YELLOW}No configured models are currently reachable.{Colors.RESET}\n"
         )
-        print("     Starting offline Mock Chat mode...\n")
+        print(f"  Options:")
+        print(f"    • Start Ollama locally: {Colors.CYAN}ollama serve{Colors.RESET}")
+        print(f"    • Add a cloud provider: type {Colors.CYAN}/model{Colors.RESET} inside chat")
+        print(f"    • Continue in offline mode (responses are simulated)\n")
+        print(f"  Continuing in offline mode...\n")
         run_mock_chat(project_info)
     else:
         # Retrieve the sticky default model from pool

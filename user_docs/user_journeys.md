@@ -226,7 +226,78 @@ Output:
 | In Chat | `/spec <name> run` | Execute next spec task |
 | In Chat | `/context` | View project memory |
 | In Chat | `/clear` | Reset conversation |
+| In Chat | `/jobs` | List all background jobs |
+| In Chat | `/job stop <name>` | Cancel a running job |
+| In Chat | `/job logs <name>` | View job output logs |
+| In Chat | `/job restart <name>` | Restart a stopped/crashed job |
+| In Chat | `/daemon status` | Check daemon health |
+| In Chat | `/daemon start` | Start the background daemon |
 | In Chat | `exit` | End session |
+| Terminal | `kognisant daemon start` | Start background daemon |
+| Terminal | `kognisant daemon stop` | Stop the daemon gracefully |
+| Terminal | `kognisant daemon status` | Check daemon status |
+| Terminal | `kognisant daemon logs` | View daemon log |
+| Terminal | `kognisant job add` | Add a new job to the queue |
+| Terminal | `kognisant job list` | List all jobs |
+| Terminal | `kognisant job cancel <name>` | Cancel a job |
+| Terminal | `kognisant job logs <name>` | View job logs |
+
+---
+
+## Scenario 9: Running a Background Bot
+**Goal**: You want the AI to build a Telegram bot and keep it running 24/7.
+
+1.  **Start Chat**: `kognisant chat`
+2.  **Ask the AI to build your bot**:
+    ```
+    Build a Telegram bot that answers FAQ questions from our knowledge base
+    ```
+3.  **The AI uses `create_script` to write the bot** to `~/.kognisant_core/scripts/telegram-bot.py` with accompanying metadata.
+4.  **The AI uses `schedule_job` to start it as a persistent job**:
+    ```
+    → Job 'telegram-bot' created as persistent (auto-restarts on crash)
+    ```
+5.  **Check status any time** using the chat command:
+    ```
+    /jobs
+    ```
+    Output:
+    ```
+    Jobs:
+      telegram-bot  persistent  running  (PID 48291)
+    ```
+6.  **Bot crashes → daemon auto-restarts** it after 5 seconds. The restart counter increments.
+7.  **Check logs** to see what happened:
+    ```
+    /job logs telegram-bot
+    ```
+    Output shows stdout and `[ERROR]` prefixed stderr from the bot script.
+
+---
+
+## Scenario 10: Scheduling a Nightly Task
+**Goal**: Run your test suite automatically at 2 AM every night.
+
+1.  **From the CLI, add a scheduled job**:
+    ```bash
+    kognisant job add --name nightly-tests --script run-tests.py --type scheduled --cron "0 2 * * *"
+    ```
+    *Kognisant validates the script exists and the cron syntax is correct.*
+2.  **The daemon picks it up** at 2:00 AM each night and executes `~/.kognisant_core/scripts/run-tests.py`.
+3.  **Check results the next morning**:
+    ```bash
+    kognisant job logs nightly-tests
+    ```
+    Shows the last 50 lines of output from the most recent run.
+4.  **Check the schedule**:
+    ```bash
+    kognisant job list
+    ```
+    Output:
+    ```
+    Jobs:
+      nightly-tests  scheduled  scheduled  last_run: 2025-06-15T02:00:05
+    ```
 
 ---
 

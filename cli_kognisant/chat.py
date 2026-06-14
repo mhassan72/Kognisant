@@ -198,12 +198,36 @@ def process_slash_commands(
                     f"  Flushes conversation history while preserving the\n"
                     f"  system prompt. Gives you a fresh context window.\n"
                 ),
+                "daemon": (
+                    f"  {Colors.BOLD}/daemon <subcommand>{Colors.RESET}\n\n"
+                    f"  Control the background daemon process from chat.\n\n"
+                    f"  Subcommands:\n"
+                    f"    /daemon status      Show if daemon is running, PID, uptime\n"
+                    f"    /daemon start       Start the daemon process\n\n"
+                    f"  The daemon polls the job queue every 15 seconds and\n"
+                    f"  executes scheduled, persistent, and agent jobs.\n"
+                ),
+                "jobs": (
+                    f"  {Colors.BOLD}/jobs{Colors.RESET}\n\n"
+                    f"  List all jobs in the queue with their name, type,\n"
+                    f"  and current state (pending, running, completed, etc.).\n"
+                ),
+                "job": (
+                    f"  {Colors.BOLD}/job <subcommand> <name>{Colors.RESET}\n\n"
+                    f"  Manage a specific job by name.\n\n"
+                    f"  Subcommands:\n"
+                    f"    /job stop <name>      Cancel job and kill subprocess\n"
+                    f"    /job logs <name>      Show last 30 lines of job log\n"
+                    f"    /job restart <name>   Restart a stopped/crash-looped job\n\n"
+                    f"  Restart resets state to 'pending' and clears the\n"
+                    f"  restart counter (persistent jobs only).\n"
+                ),
             }
 
             if help_topic in detailed_help:
                 print(f"\n{detailed_help[help_topic]}")
             else:
-                print(f"  {Colors.YELLOW}No detailed help for '{help_topic}'. Available: agent, spec, model, tool, read, paste, context, clear{Colors.RESET}\n")
+                print(f"  {Colors.YELLOW}No detailed help for '{help_topic}'. Available: agent, spec, model, tool, read, paste, context, clear, daemon, jobs, job{Colors.RESET}\n")
             return True
 
         # Compact help overview
@@ -211,6 +235,7 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Basics{Colors.RESET}        /files  /read <path>  /context  /clear")
         print(f"  {Colors.BOLD}AI Config{Colors.RESET}     /model  /providers")
         print(f"  {Colors.BOLD}Power Tools{Colors.RESET}   /agent <task>  /spec  /tool")
+        print(f"  {Colors.BOLD}Daemon & Jobs{Colors.RESET} /daemon status|start  /jobs  /job stop|logs|restart <name>")
         print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
         print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
         print(f"  Type {Colors.CYAN}/help <command>{Colors.RESET} for details (e.g. /help agent)\n")
@@ -765,6 +790,142 @@ def process_slash_commands(
                 print(
                     f"  ⚠️  {Colors.YELLOW}Global tool '{name}' was not found in directory.{Colors.RESET}\n"
                 )
+            return True
+
+    elif cmd == "/jobs":
+        # Display all jobs from the Job Queue (R8-AC1)
+        from .jobs import JobQueue
+
+        queue = JobQueue()
+        jobs = queue.load()
+
+        if not jobs:
+            print(f"  {Colors.YELLOW}No jobs in the queue.{Colors.RESET}\n")
+            return True
+
+        print(f"\n  {Colors.BOLD}{'Name':<20} {'Type':<12} {'State':<12}{Colors.RESET}")
+        print(f"  {'─' * 44}")
+        for job in jobs:
+            name = job.get("name", "?")
+            jtype = job.get("type", "?")
+            state = job.get("state", "?")
+
+            # Color-code state
+            if state == "running":
+                state_display = f"{Colors.GREEN}{state}{Colors.RESET}"
+            elif state in ("failed", "crash_loop", "cancelled"):
+                state_display = f"{Colors.RED}{state}{Colors.RESET}"
+            elif state == "completed":
+                state_display = f"{Colors.CYAN}{state}{Colors.RESET}"
+            else:
+                state_display = f"{Colors.YELLOW}{state}{Colors.RESET}"
+
+            print(f"  {name:<20} {jtype:<12} {state_display}")
+        print()
+        return True
+
+    elif cmd == "/job":
+        # Job management: /job stop|logs|restart <name> (R8-AC2,3,4,7)
+        from .jobs import JobQueue
+
+        if len(parts) < 2:
+            print(f"  {Colors.YELLOW}Usage: /job stop|logs|restart <name>{Colors.RESET}\n")
+            return True
+
+        subparts = parts[1].split(None, 1)
+        subcmd = subparts[0].lower() if subparts else ""
+        job_name = subparts[1].strip() if len(subparts) > 1 else ""
+
+        if not job_name:
+            print(f"  {Colors.YELLOW}Usage: /job {subcmd} <name>{Colors.RESET}\n")
+            return True
+
+        queue = JobQueue()
+        job = queue.get_job(job_name)
+
+        if job is None:
+            # R8-AC7: error for non-existent job
+            print(f"  {Colors.RED}Error: Job '{job_name}' not found.{Colors.RESET}\n")
+            return True
+
+        if subcmd == "stop":
+            # R8-AC2: cancel job, terminate subprocess if running
+            pid = job.get("pid")
+            if pid:
+                import signal as sig
+                try:
+                    os.kill(pid, sig.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            queue.update_status(job_name, "cancelled")
+            print(f"  {Colors.GREEN}Job '{job_name}' stopped.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "logs":
+            # R8-AC3: display last 30 lines of job log
+            log_output = queue.read_job_logs(job_name, lines=30)
+            print(f"\n  {Colors.BOLD}--- Logs: {job_name} (last 30 lines) ---{Colors.RESET}")
+            print(log_output)
+            print(f"  {Colors.BOLD}{'─' * 40}{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "restart":
+            # R8-AC4: restart stopped/crash_looped persistent job
+            if job.get("type") != "persistent":
+                print(f"  {Colors.YELLOW}Only persistent jobs can be restarted.{Colors.RESET}\n")
+                return True
+            if job.get("state") not in ("cancelled", "failed", "crash_loop", "completed"):
+                print(f"  {Colors.YELLOW}Job '{job_name}' is in state '{job.get('state')}' and cannot be restarted.{Colors.RESET}\n")
+                return True
+
+            queue.update_status(
+                job_name, "pending",
+                restart_count=0,
+                restart_timestamps=[],
+            )
+            print(f"  {Colors.GREEN}Job '{job_name}' restarted (state reset to pending).{Colors.RESET}\n")
+            return True
+
+        else:
+            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /job stop|logs|restart <name>{Colors.RESET}\n")
+            return True
+
+    elif cmd == "/daemon":
+        # Daemon control: /daemon status|start (R8-AC5,6)
+        from .daemon import DaemonManager
+
+        if len(parts) < 2:
+            print(f"  {Colors.YELLOW}Usage: /daemon status|start{Colors.RESET}\n")
+            return True
+
+        subcmd = parts[1].strip().lower()
+
+        if subcmd == "status":
+            # R8-AC5: display daemon status, PID, uptime
+            status_info = DaemonManager.status()
+            if status_info["running"]:
+                print(f"\n  {Colors.BOLD}Daemon Status:{Colors.RESET}")
+                print(f"    Running:  {Colors.GREEN}Yes{Colors.RESET}")
+                print(f"    PID:      {status_info['pid']}")
+                print(f"    Uptime:   {status_info['uptime'] or 'unknown'}")
+            else:
+                print(f"\n  {Colors.BOLD}Daemon Status:{Colors.RESET}")
+                print(f"    Running:  {Colors.RED}No{Colors.RESET}")
+            print()
+            return True
+
+        elif subcmd == "start":
+            # R8-AC6: start daemon and display confirmation
+            try:
+                pid = DaemonManager.start()
+                print(f"  {Colors.GREEN}Daemon started with PID {pid}.{Colors.RESET}\n")
+            except RuntimeError as e:
+                print(f"  {Colors.RED}Error: {e}{Colors.RESET}\n")
+            return True
+
+        else:
+            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /daemon status|start{Colors.RESET}\n")
             return True
 
     return False

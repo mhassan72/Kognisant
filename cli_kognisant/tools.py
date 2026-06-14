@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -8,6 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+
+from .scripts import create_script, read_script, edit_script, delete_script, list_scripts
+from .jobs import JobQueue, CronParser
 
 # Standard tools specification available to Kognisant models
 # Contains local workspace capabilities, standard headless browser, native browser launcher, headless search, and active console monitor
@@ -259,6 +263,199 @@ TOOLS_SPEC = [
             },
         },
     },
+    # --- Script Management Tools (R6) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "create_script",
+            "description": "Create a new Python script in the global scripts folder (~/.kognisant_core/scripts/) with accompanying metadata.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Script name (lowercase alphanumeric, hyphens, underscores, 1-64 chars).",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The Python script content to write.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of what the script does.",
+                    },
+                    "env_vars": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of required environment variable names for this script.",
+                    },
+                },
+                "required": ["name", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_script",
+            "description": "Read the content of a Python script from the global scripts folder (~/.kognisant_core/scripts/).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the script to read.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_script",
+            "description": "Apply sequential find-and-replace edits to an existing script in the global scripts folder. All edits are rolled back if any old_text is not found.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the script to edit.",
+                    },
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {
+                                    "type": "string",
+                                    "description": "The exact text to find in the script.",
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "description": "The replacement text.",
+                                },
+                            },
+                            "required": ["old_text", "new_text"],
+                        },
+                        "description": "List of sequential find-and-replace edits.",
+                    },
+                },
+                "required": ["name", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_script",
+            "description": "Delete a Python script and its metadata from the global scripts folder (~/.kognisant_core/scripts/).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the script to delete.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scripts",
+            "description": "List all scripts in the global scripts folder (~/.kognisant_core/scripts/) with their names, descriptions, and required environment variables.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    # --- Job Management Tools (R9) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_job",
+            "description": "Create a new job in the job queue. For 'scheduled' type, a valid cron expression is required. For 'persistent' or 'scheduled' types, the referenced script must exist in ~/.kognisant_core/scripts/.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Job name (lowercase alphanumeric, hyphens, underscores, 1-64 chars).",
+                    },
+                    "script_path": {
+                        "type": "string",
+                        "description": "Path to the script file (relative to ~/.kognisant_core/scripts/). Required for persistent and scheduled job types.",
+                    },
+                    "job_type": {
+                        "type": "string",
+                        "enum": ["scheduled", "persistent", "agent"],
+                        "description": "The type of job: 'scheduled' (cron-based), 'persistent' (always-on), or 'agent' (one-shot AI task).",
+                    },
+                    "cron_expression": {
+                        "type": "string",
+                        "description": "A 5-field cron expression (e.g., '*/15 * * * *'). Required when job_type is 'scheduled'.",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Task description for agent-type jobs. Required when job_type is 'agent'.",
+                    },
+                    "env_vars": {
+                        "type": "object",
+                        "description": "Environment variables to pass to the job (key-value pairs).",
+                    },
+                },
+                "required": ["name", "job_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_job",
+            "description": "Cancel a job by updating its state to 'cancelled' and terminating its subprocess if running.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the job to cancel.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_jobs",
+            "description": "List all jobs in the job queue with their name, type, current state, and last execution timestamp.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "job_logs",
+            "description": "Return the last N lines from a job's log file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the job to get logs for.",
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of log lines to return (default: 50).",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 
@@ -505,7 +702,7 @@ def capture_active_browser_console():
 
 
 def resolve_safe_path(file_path, project_root):
-    """Safely resolves file_path, allowing paths in project_root or ~/.kognisant_core/tools or ~/.kognisant_core/skills.
+    """Safely resolves file_path, allowing paths in project_root or ~/.kognisant_core/tools, ~/.kognisant_core/skills, or ~/.kognisant_core/scripts.
 
     Returns the absolute real path if valid, otherwise raises a PermissionError with a descriptive message.
     """
@@ -521,25 +718,30 @@ def resolve_safe_path(file_path, project_root):
 
     global_tools_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/tools"))
     global_skills_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/skills"))
+    global_scripts_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/scripts"))
 
     is_in_project = real_target.startswith(real_root)
     is_in_global_tools = real_target.startswith(global_tools_dir)
     is_in_global_skills = real_target.startswith(global_skills_dir)
+    is_in_global_scripts = real_target.startswith(global_scripts_dir)
 
-    if not (is_in_project or is_in_global_tools or is_in_global_skills):
+    if not (is_in_project or is_in_global_tools or is_in_global_skills or is_in_global_scripts):
         raise PermissionError(
-            "Access denied: Cannot access paths outside the project root or global tools/skills directories."
+            "Access denied: Cannot access paths outside the project root or global tools/skills/scripts directories."
         )
 
     return real_target
 
 
 def is_strictly_global_path(real_path):
-    """Verifies that the absolute path resides strictly under ~/.kognisant_core/tools/ or ~/.kognisant_core/skills/."""
+    """Verifies that the absolute path resides strictly under ~/.kognisant_core/tools/, ~/.kognisant_core/skills/, or ~/.kognisant_core/scripts/."""
     global_tools_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/tools"))
     global_skills_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/skills"))
-    return real_path.startswith(global_tools_dir) or real_path.startswith(
-        global_skills_dir
+    global_scripts_dir = os.path.realpath(os.path.expanduser("~/.kognisant_core/scripts"))
+    return (
+        real_path.startswith(global_tools_dir)
+        or real_path.startswith(global_skills_dir)
+        or real_path.startswith(global_scripts_dir)
     )
 
 
@@ -839,6 +1041,154 @@ def execute_tool(name, arguments, project_info):
             return f"[Success] Sequentially applied {len(edits)} find-and-replace edits inside global file '{file_path}'."
         except Exception as e:
             return f"[Error] Failed to edit global file: {e}"
+
+    # --- Script Management Tool Handlers (R6) ---
+
+    elif name == "create_script":
+        script_name = args.get("name", "").strip()
+        content = args.get("content", "")
+        description = args.get("description", "")
+        env_vars = args.get("env_vars", None)
+        if not script_name:
+            return "[Error] name is required."
+        if not content:
+            return "[Error] content is required."
+        return create_script(script_name, content, description, env_vars)
+
+    elif name == "read_script":
+        script_name = args.get("name", "").strip()
+        if not script_name:
+            return "[Error] name is required."
+        return read_script(script_name)
+
+    elif name == "edit_script":
+        script_name = args.get("name", "").strip()
+        edits = args.get("edits", [])
+        if not script_name:
+            return "[Error] name is required."
+        if not edits:
+            return "[Error] edits array is required."
+        return edit_script(script_name, edits)
+
+    elif name == "delete_script":
+        script_name = args.get("name", "").strip()
+        if not script_name:
+            return "[Error] name is required."
+        return delete_script(script_name)
+
+    elif name == "list_scripts":
+        return list_scripts()
+
+    # --- Job Management Tool Handlers (R9) ---
+
+    elif name == "schedule_job":
+        job_name = args.get("name", "").strip()
+        job_type = args.get("job_type", "").strip()
+        script_path = args.get("script_path", "").strip()
+        cron_expression = args.get("cron_expression", "").strip() if args.get("cron_expression") else None
+        task = args.get("task", "").strip() if args.get("task") else None
+        env_vars = args.get("env_vars", {})
+
+        if not job_name:
+            return "[Error] name is required."
+        if not job_type:
+            return "[Error] job_type is required."
+
+        # R9-AC5: scheduled type requires cron_expression
+        if job_type == "scheduled" and not cron_expression:
+            return "[Error] cron_expression is required for scheduled job type."
+
+        # Validate cron expression syntax if provided
+        if cron_expression and not CronParser.validate(cron_expression):
+            return f"[Error] Invalid cron expression: '{cron_expression}'"
+
+        # R9-AC6: persistent/scheduled types require script to exist
+        if job_type in ("persistent", "scheduled"):
+            if not script_path:
+                return "[Error] script_path is required for persistent and scheduled job types."
+            scripts_dir = os.path.expanduser("~/.kognisant_core/scripts")
+            # Handle both bare name and name with .py extension
+            check_path = script_path if script_path.endswith(".py") else f"{script_path}.py"
+            full_script_path = os.path.join(scripts_dir, check_path)
+            if not os.path.exists(full_script_path):
+                return f"[Error] Script '{script_path}' not found in ~/.kognisant_core/scripts/"
+
+        # Agent type requires a task description
+        if job_type == "agent" and not task:
+            return "[Error] task is required for agent job type."
+
+        # Build job config and delegate to JobQueue
+        job_queue = JobQueue()
+        job_config = {
+            "name": job_name,
+            "type": job_type,
+            "script_path": script_path,
+            "cron_expression": cron_expression,
+            "task": task,
+            "env_vars": env_vars,
+        }
+
+        try:
+            result = job_queue.add_job(job_config)
+            return result
+        except ValueError as e:
+            return f"[Error] {e}"
+
+    elif name == "cancel_job":
+        job_name = args.get("name", "").strip()
+        if not job_name:
+            return "[Error] name is required."
+
+        job_queue = JobQueue()
+        job = job_queue.get_job(job_name)
+
+        # R9-AC8: error if job not found
+        if job is None:
+            return f"[Error] Job '{job_name}' not found"
+
+        # Terminate subprocess if running
+        pid = job.get("pid")
+        if pid and job.get("state") == "running":
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass  # Process already gone
+
+        # Update state to cancelled
+        job_queue.update_status(job_name, "cancelled", pid=None)
+        return f"Job '{job_name}' cancelled successfully"
+
+    elif name == "list_jobs":
+        job_queue = JobQueue()
+        jobs = job_queue.load()
+
+        if not jobs:
+            return "No jobs found"
+
+        lines = []
+        for job in jobs:
+            entry = f"  {job.get('name', '?')} [{job.get('type', '?')}] - {job.get('state', '?')}"
+            last_run = job.get("last_run_at")
+            if last_run:
+                entry += f" (last run: {last_run})"
+            lines.append(entry)
+
+        return "Jobs:\n" + "\n".join(lines)
+
+    elif name == "job_logs":
+        job_name = args.get("name", "").strip()
+        lines_count = args.get("lines", 50)
+        if not job_name:
+            return "[Error] name is required."
+
+        job_queue = JobQueue()
+        job = job_queue.get_job(job_name)
+
+        # R9-AC8: error if job not found
+        if job is None:
+            return f"[Error] Job '{job_name}' not found"
+
+        return job_queue.read_job_logs(job_name, lines=lines_count)
 
     # Dynamic Global Transferable Tool Execution (Subprocess Sandbox)
     global_dir = os.path.expanduser("~/.kognisant_core/tools")

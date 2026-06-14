@@ -336,6 +336,8 @@ def init_global_core():
         os.makedirs(GLOBAL_CORE_DIR, exist_ok=True)
         os.makedirs(os.path.join(GLOBAL_CORE_DIR, "skills"), exist_ok=True)
         os.makedirs(os.path.join(GLOBAL_CORE_DIR, "tools"), exist_ok=True)
+        os.makedirs(os.path.join(GLOBAL_CORE_DIR, "scripts"), exist_ok=True)
+        os.makedirs(os.path.join(GLOBAL_CORE_DIR, "logs"), exist_ok=True)
 
         projects_file = os.path.join(GLOBAL_CORE_DIR, "projects.json")
         if not os.path.exists(projects_file):

@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 
 from .chat import chat_flow
@@ -7,6 +8,8 @@ from .config import (
     find_project_root,
     init_project,
 )
+from .daemon import DaemonManager
+from .jobs import CronParser, JobQueue, JOB_NAME_PATTERN
 
 
 def _handle_setup():
@@ -167,6 +170,241 @@ def _check_model_health(model_config):
     return f"{Colors.RED}🔴 Unreachable{Colors.RESET}"
 
 
+def _handle_daemon(args):
+    """Dispatch daemon subcommands to DaemonManager methods."""
+    if args.daemon_command == "start":
+        try:
+            DaemonManager.start()
+        except RuntimeError:
+            # Error already printed to stderr by DaemonManager.start()
+            sys.exit(1)
+    elif args.daemon_command == "stop":
+        success = DaemonManager.stop()
+        if not success:
+            sys.exit(1)
+        print("Daemon stopped.")
+    elif args.daemon_command == "status":
+        status = DaemonManager.status()
+        if status["running"]:
+            uptime_str = f" (uptime: {status['uptime']})" if status["uptime"] else ""
+            print(f"Daemon is {Colors.GREEN}running{Colors.RESET} with PID {status['pid']}{uptime_str}")
+        else:
+            print(f"Daemon is {Colors.RED}not running{Colors.RESET}")
+    elif args.daemon_command == "logs":
+        output = DaemonManager.read_logs()
+        print(output)
+    else:
+        print("Usage: kognisant daemon {start|stop|status|logs}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_job(args):
+    """Dispatch job subcommands with input validation."""
+    if args.job_command == "add":
+        _handle_job_add(args)
+    elif args.job_command == "list":
+        _handle_job_list()
+    elif args.job_command == "cancel":
+        _handle_job_cancel(args.name)
+    elif args.job_command == "logs":
+        _handle_job_logs(args.name)
+    else:
+        print("Usage: kognisant job {add|list|cancel|logs}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_job_add(args):
+    """Handle `kognisant job add` with full validation."""
+    name = args.name
+    job_type = args.job_type
+    script = args.script
+    cron = args.cron
+    task = args.task
+    env_args = args.env
+
+    # Validate job name (R7-AC10)
+    if not JOB_NAME_PATTERN.match(name):
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} Invalid job name '{name}'. "
+            "Must be 1-64 characters, lowercase alphanumeric, hyphens, or underscores only.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Validate job type (R7-AC9)
+    valid_types = ("scheduled", "persistent", "agent")
+    if job_type not in valid_types:
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} Invalid job type '{job_type}'. "
+            f"Must be one of: {', '.join(valid_types)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Type-specific validation
+    if job_type == "scheduled":
+        if not cron:
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} --cron is required for scheduled jobs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not CronParser.validate(cron):
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} Invalid cron expression '{cron}'. "
+                "Expected 5 fields: minute hour day-of-month month day-of-week.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not script:
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} --script is required for scheduled jobs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    elif job_type == "persistent":
+        if not script:
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} --script is required for persistent jobs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    elif job_type == "agent":
+        if not task:
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} --task is required for agent jobs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Verify script exists in ~/.kognisant_core/scripts/ (R7-AC1)
+    if script:
+        scripts_dir = os.path.expanduser("~/.kognisant_core/scripts")
+        script_path = os.path.join(scripts_dir, script)
+        if not os.path.exists(script_path):
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} Script '{script}' not found in {scripts_dir}/",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Parse environment variables
+    env_vars = {}
+    if env_args:
+        for env_str in env_args:
+            if "=" not in env_str:
+                print(
+                    f"{Colors.RED}Error:{Colors.RESET} Invalid env format '{env_str}'. "
+                    "Expected KEY=VAL.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            key, val = env_str.split("=", 1)
+            env_vars[key] = val
+
+    # Build job config and add to queue (R7-AC8: lock acquired inside JobQueue)
+    job_config = {
+        "name": name,
+        "type": job_type,
+        "script_path": script or "",
+        "task": task,
+        "cron_expression": cron,
+        "env_vars": env_vars,
+    }
+
+    queue = JobQueue()
+    try:
+        result = queue.add_job(job_config)
+        print(f"{Colors.GREEN}{result}{Colors.RESET}")
+    except ValueError as e:
+        print(f"{Colors.RED}Error:{Colors.RESET} {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_job_list():
+    """Handle `kognisant job list` — display all jobs in a table."""
+    queue = JobQueue()
+    jobs = queue.load()
+
+    if not jobs:
+        print("No jobs in the queue.")
+        return
+
+    # Print table header
+    print(f"\n  {'NAME':<20} {'TYPE':<12} {'STATE':<12} {'LAST RUN':<20}")
+    print(f"  {'─' * 20} {'─' * 12} {'─' * 12} {'─' * 20}")
+
+    for job in jobs:
+        name = job.get("name", "?")[:20]
+        job_type = job.get("type", "?")
+        state = job.get("state", "?")
+        last_run = job.get("last_run_at") or "—"
+
+        # Color-code state
+        if state == "running":
+            state_display = f"{Colors.GREEN}{state}{Colors.RESET}"
+        elif state in ("failed", "crash_loop"):
+            state_display = f"{Colors.RED}{state}{Colors.RESET}"
+        elif state == "cancelled":
+            state_display = f"{Colors.YELLOW}{state}{Colors.RESET}"
+        else:
+            state_display = state
+
+        print(f"  {name:<20} {job_type:<12} {state_display:<22} {last_run:<20}")
+
+    print()
+
+
+def _handle_job_cancel(name: str):
+    """Handle `kognisant job cancel <name>` — cancel a job and kill subprocess."""
+    queue = JobQueue()
+    job = queue.get_job(name)
+
+    if job is None:
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} Job '{name}' not found.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # If the job has a running subprocess, terminate it (R7-AC4,7)
+    pid = job.get("pid")
+    if pid and job.get("state") == "running":
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass  # Process already gone or not owned
+
+    success = queue.update_status(name, "cancelled")
+    if success:
+        print(f"Job '{name}' cancelled.")
+    else:
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} Failed to update job '{name}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _handle_job_logs(name: str):
+    """Handle `kognisant job logs <name>` — show last 50 lines of job log."""
+    queue = JobQueue()
+    job = queue.get_job(name)
+
+    if job is None:
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} Job '{name}' not found.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    output = queue.read_job_logs(name)
+    print(output)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="cli-kognisant: A Python CLI application."
@@ -218,6 +456,63 @@ def main():
     awesome_parser.add_argument(
         "-l", "--level", type=int, default=1, help="Awesome level (1-10)"
     )
+
+    # --- Daemon subcommands ---
+    daemon_parser = subparsers.add_parser(
+        "daemon", help="Manage the background daemon process"
+    )
+    daemon_subparsers = daemon_parser.add_subparsers(
+        dest="daemon_command", help="Daemon actions"
+    )
+    daemon_subparsers.add_parser("start", help="Start the background daemon")
+    daemon_subparsers.add_parser("stop", help="Stop the running daemon")
+    daemon_subparsers.add_parser("status", help="Show daemon status")
+    daemon_subparsers.add_parser("logs", help="Show daemon log output")
+
+    # --- Job subcommands ---
+    job_parser = subparsers.add_parser(
+        "job", help="Manage background jobs"
+    )
+    job_subparsers = job_parser.add_subparsers(
+        dest="job_command", help="Job actions"
+    )
+
+    # job add
+    job_add_parser = job_subparsers.add_parser("add", help="Add a new job")
+    job_add_parser.add_argument(
+        "-n", "--name", required=True, help="Job name (1-64 chars, [a-z0-9_-])"
+    )
+    job_add_parser.add_argument(
+        "-s", "--script", default=None,
+        help="Script name (required for scheduled/persistent jobs)"
+    )
+    job_add_parser.add_argument(
+        "-t", "--type", required=True, dest="job_type",
+        help="Job type: scheduled, persistent, or agent"
+    )
+    job_add_parser.add_argument(
+        "-c", "--cron", default=None,
+        help="Cron expression (required for scheduled jobs)"
+    )
+    job_add_parser.add_argument(
+        "--task", default=None,
+        help="Task description (required for agent jobs)"
+    )
+    job_add_parser.add_argument(
+        "-e", "--env", action="append", default=None,
+        help="Environment variable as KEY=VAL (repeatable)"
+    )
+
+    # job list
+    job_subparsers.add_parser("list", help="List all jobs")
+
+    # job cancel
+    job_cancel_parser = job_subparsers.add_parser("cancel", help="Cancel a job")
+    job_cancel_parser.add_argument("name", help="Name of the job to cancel")
+
+    # job logs
+    job_logs_parser = job_subparsers.add_parser("logs", help="Show job logs")
+    job_logs_parser.add_argument("name", help="Name of the job to show logs for")
 
     args = parser.parse_args()
 
@@ -336,6 +631,10 @@ def main():
         print(
             f"{Colors.BOLD}{Colors.MAGENTA}Awesome feature engaged at level {level}!{Colors.RESET}"
         )
+    elif args.command == "daemon":
+        _handle_daemon(args)
+    elif args.command == "job":
+        _handle_job(args)
     else:
         parser.print_help()
 

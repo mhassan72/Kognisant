@@ -17,6 +17,7 @@ This manual provides an exhaustive guide to installing, configuring, and interac
 8. [Spec-Driven Development (SDD) Command](#8-spec-driven-development-sdd-command)
 9. [Hardened Safety & System Boundaries](#9-hardened-safety--system-boundaries)
 10. [Troubleshooting & Support](#10-troubleshooting--support)
+11. [Daemon & Background Jobs](#11-daemon--background-jobs)
 
 ---
 
@@ -125,6 +126,9 @@ Kognisant provides an extensive suite of in-chat commands to inspect state, swit
 | `/agent` | `/agent <task>` | Spawns a concurrent, background **PERP Swarm** to solve a complex coding task. |
 | `/tool` | `/tool <subcommand>` | Opens the global tool management wizard (list, register, delete global tools). |
 | `/paste` / `/p` | `/paste` | Opens secure paste mode. Type `/end` on a blank line to submit large log traces. |
+| `/jobs` | `/jobs` | Lists all background jobs with name, type, and current state. |
+| `/job` | `/job stop\|logs\|restart <name>` | Manage a specific job: stop it, view logs, or restart a crashed job. |
+| `/daemon` | `/daemon status\|start` | Check daemon health or start the background daemon process. |
 | `/clear` | `/clear` | Flushes active session conversational logs, starting fresh while preserving system prompts. |
 | `exit` / `quit` | `exit` | Safely terminates your session, saves logs to `.kognisant/history/`, and exits. |
 
@@ -331,6 +335,118 @@ If you configure a small, local Ollama model that does not understand tool calli
     ```bash
     pip install --no-cache-dir --upgrade cli-kognisant
     ```
+
+---
+
+## 11. Daemon & Background Jobs
+
+Kognisant includes a built-in background daemon that can run scripts autonomously — bots, cron jobs, monitoring tasks, and AI agent work — without keeping a terminal open.
+
+### Starting & Stopping the Daemon
+
+The daemon is a forked background process that polls a job queue every 15 seconds.
+
+```bash
+# Start the daemon (forks to background)
+kognisant daemon start
+
+# Check if it's running
+kognisant daemon status
+
+# View daemon operational logs
+kognisant daemon logs
+
+# Stop the daemon gracefully (sends SIGTERM, waits for jobs to finish)
+kognisant daemon stop
+```
+
+When the daemon stops, it sends SIGTERM to all running job subprocesses, waits up to 10 seconds for each to exit, then sends SIGKILL if needed. The PID file is cleaned up on exit.
+
+### Managing Jobs
+
+Jobs are units of work stored in `~/.kognisant_core/jobs.json`. Each job has a name, type, and state.
+
+```bash
+# Add a scheduled job (runs on a cron schedule)
+kognisant job add --name nightly-tests --script run-tests.py --type scheduled --cron "0 2 * * *"
+
+# Add a persistent job (runs continuously, auto-restarts on crash)
+kognisant job add --name telegram-bot --script telegram-bot.py --type persistent
+
+# List all jobs with their current state
+kognisant job list
+
+# Cancel a running job (terminates the subprocess)
+kognisant job cancel my-job
+
+# View the last 50 lines of a job's output
+kognisant job logs my-job
+```
+
+### Script Management (AI-Created Scripts)
+
+The AI agent creates and manages scripts in `~/.kognisant_core/scripts/`. Each script has:
+- A `.py` file with the executable code
+- A `.json` metadata sidecar with description, required env vars, and creation timestamp
+
+Scripts follow a contract:
+- **stdin**: Receives a JSON object with `{job_name, job_type, env_vars, timestamp}`
+- **stdout**: Captured to `~/.kognisant_core/logs/{job_name}.log`
+- **stderr**: Captured with `[ERROR]` prefix per line
+- **exit 0**: Success | **exit non-zero**: Failure (triggers restart for persistent jobs)
+
+### Chat Slash Commands for Jobs
+
+From within `kognisant chat`, you can manage jobs without leaving the session:
+
+| Command | Description |
+| :--- | :--- |
+| `/jobs` | List all jobs with name, type, and state |
+| `/job stop <name>` | Cancel a running job |
+| `/job logs <name>` | View last 30 lines of job output |
+| `/job restart <name>` | Restart a stopped or crash-looped persistent job |
+| `/daemon status` | Show daemon PID, uptime, and running state |
+| `/daemon start` | Start the daemon from within chat |
+
+### Job Types Explained
+
+| Type | Behavior | Auto-Restart | Use Case |
+| :--- | :--- | :--- | :--- |
+| **scheduled** | Runs on a cron expression, exits after each run | No | Nightly tests, periodic reports |
+| **persistent** | Runs continuously as a long-lived process | Yes (5s delay) | Telegram bots, Discord bots, monitoring |
+| **agent** | One-shot PERP swarm task, completes when done | No | Complex autonomous coding tasks |
+
+### Crash Loop Detection
+
+Persistent jobs are automatically restarted when they exit with a non-zero code. However, if a job accumulates **more than 5 restarts within a rolling 60-second window**, the daemon marks it as `crash_loop` and stops restarting it.
+
+To recover from a crash loop:
+```
+/job restart my-bot
+```
+This resets the restart counter and puts the job back in `pending` state.
+
+### File System Layout
+
+```
+~/.kognisant_core/
+├── daemon.pid          # PID of the running daemon process
+├── daemon.log          # Daemon operational log (timestamped entries)
+├── jobs.json           # Job queue (locked via jobs.lock for concurrency)
+├── jobs.lock           # Advisory lock file (fcntl.flock)
+├── logs/               # Per-job stdout/stderr output
+│   ├── telegram-bot.log
+│   ├── nightly-tests.log
+│   └── refactor-task.log
+├── scripts/            # AI-managed global scripts
+│   ├── telegram-bot.py
+│   ├── telegram-bot.json
+│   ├── run-tests.py
+│   └── run-tests.json
+├── models_pool.json
+├── skills/
+└── tools/
+```
 
 ---
 *Kognisant is open-source and free-to-use under the MIT License. Share, modify, and build universal agentic intelligence freely!*

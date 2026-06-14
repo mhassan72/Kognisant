@@ -340,11 +340,16 @@ class TestJobQueue(unittest.TestCase):
         self.assertEqual(job["state"], "pending")
         self.assertEqual(job["script_path"], "my_script.py")
         self.assertIsNone(job["task"])
+        self.assertIsNone(job["project_root"])
         self.assertIsNone(job["cron_expression"])
         self.assertEqual(job["env_vars"], {})
+        self.assertEqual(job["scheduler_policy"], "skip")
         self.assertIsNotNone(job["created_at"])
         self.assertIsNone(job["last_run_at"])
+        self.assertIsNone(job["last_exit_code"])
+        self.assertEqual(job["run_count"], 0)
         self.assertIsNone(job["pid"])
+        self.assertIsNone(job["pid_started_at"])
         self.assertEqual(job["restart_count"], 0)
         self.assertEqual(job["restart_timestamps"], [])
 
@@ -588,11 +593,12 @@ class TestJobQueue(unittest.TestCase):
         ]
         self.queue.save(jobs)
 
-        # Verify the file content directly
+        # Verify the file content directly - now uses versioned format
         with open(self.queue.queue_path, "r") as f:
             loaded = json.load(f)
-        self.assertEqual(len(loaded), 2)
-        self.assertEqual(loaded[0]["name"], "job1")
+        self.assertEqual(loaded["schema_version"], 1)
+        self.assertEqual(len(loaded["jobs"]), 2)
+        self.assertEqual(loaded["jobs"][0]["name"], "job1")
 
     def test_load_missing_file_returns_empty(self):
         """load() returns empty list when jobs.json doesn't exist."""

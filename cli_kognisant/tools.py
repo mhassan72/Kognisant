@@ -11,7 +11,7 @@ import urllib.request
 import webbrowser
 
 from .scripts import create_script, read_script, edit_script, delete_script, list_scripts
-from .jobs import JobQueue, CronParser
+from .jobs import JobQueue, CronParser, format_error, CANCELLABLE_STATES, TERMINAL_STATES
 
 # Standard tools specification available to Kognisant models
 # Contains local workspace capabilities, standard headless browser, native browser launcher, headless search, and active console monitor
@@ -451,6 +451,23 @@ TOOLS_SPEC = [
                         "type": "integer",
                         "description": "Number of log lines to return (default: 50).",
                     },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_job",
+            "description": "Permanently remove a job from the queue. If the job is currently running, its subprocess will be terminated first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the job to remove.",
+                    }
                 },
                 "required": ["name"],
             },
@@ -1090,32 +1107,44 @@ def execute_tool(name, arguments, project_info):
         env_vars = args.get("env_vars", {})
 
         if not job_name:
-            return "[Error] name is required."
+            return format_error("validation", "name is required")
         if not job_type:
-            return "[Error] job_type is required."
+            return format_error("validation", "job_type is required")
 
         # R9-AC5: scheduled type requires cron_expression
         if job_type == "scheduled" and not cron_expression:
-            return "[Error] cron_expression is required for scheduled job type."
+            return format_error("validation", "cron_expression is required for scheduled job type")
 
         # Validate cron expression syntax if provided
         if cron_expression and not CronParser.validate(cron_expression):
-            return f"[Error] Invalid cron expression: '{cron_expression}'"
+            return format_error("validation", f"Invalid cron expression: '{cron_expression}'")
+
+        # Unmatchable cron warning (Requirement 34)
+        if cron_expression and CronParser.validate(cron_expression):
+            if not CronParser.can_match_within_days(cron_expression):
+                return format_error(
+                    "validation",
+                    f"Cron expression '{cron_expression}' may never produce a match within 366 days",
+                    "Verify the expression is correct before scheduling."
+                )
 
         # R9-AC6: persistent/scheduled types require script to exist
         if job_type in ("persistent", "scheduled"):
             if not script_path:
-                return "[Error] script_path is required for persistent and scheduled job types."
+                return format_error("validation", "script_path is required for persistent and scheduled job types")
             scripts_dir = os.path.expanduser("~/.kognisant_core/scripts")
             # Handle both bare name and name with .py extension
             check_path = script_path if script_path.endswith(".py") else f"{script_path}.py"
             full_script_path = os.path.join(scripts_dir, check_path)
             if not os.path.exists(full_script_path):
-                return f"[Error] Script '{script_path}' not found in ~/.kognisant_core/scripts/"
+                return format_error(
+                    "not_found",
+                    f"Script '{script_path}' not found in ~/.kognisant_core/scripts/"
+                )
 
         # Agent type requires a task description
         if job_type == "agent" and not task:
-            return "[Error] task is required for agent job type."
+            return format_error("validation", "task is required for agent job type")
 
         # Build job config and delegate to JobQueue
         job_queue = JobQueue()
@@ -1132,23 +1161,41 @@ def execute_tool(name, arguments, project_info):
             result = job_queue.add_job(job_config)
             return result
         except ValueError as e:
-            return f"[Error] {e}"
+            return format_error("validation", str(e))
 
     elif name == "cancel_job":
         job_name = args.get("name", "").strip()
         if not job_name:
-            return "[Error] name is required."
+            return format_error("validation", "name is required")
 
         job_queue = JobQueue()
         job = job_queue.get_job(job_name)
 
         # R9-AC8: error if job not found
         if job is None:
-            return f"[Error] Job '{job_name}' not found"
+            return format_error(
+                "not_found",
+                f"Job '{job_name}' does not exist",
+                "Use 'kognisant job list' to see available jobs."
+            )
+
+        # Cancel state validation (Requirement 31)
+        current_state = job.get("state", "")
+        if current_state in TERMINAL_STATES:
+            return format_error(
+                "state",
+                f"Job '{job_name}' is in '{current_state}' state and cannot be cancelled"
+            )
+
+        if current_state not in CANCELLABLE_STATES:
+            return format_error(
+                "state",
+                f"Job '{job_name}' is in '{current_state}' state and cannot be cancelled"
+            )
 
         # Terminate subprocess if running
         pid = job.get("pid")
-        if pid and job.get("state") == "running":
+        if pid and current_state == "running":
             try:
                 os.kill(pid, signal.SIGTERM)
             except (OSError, ProcessLookupError):
@@ -1179,16 +1226,49 @@ def execute_tool(name, arguments, project_info):
         job_name = args.get("name", "").strip()
         lines_count = args.get("lines", 50)
         if not job_name:
-            return "[Error] name is required."
+            return format_error("validation", "name is required")
 
         job_queue = JobQueue()
         job = job_queue.get_job(job_name)
 
         # R9-AC8: error if job not found
         if job is None:
-            return f"[Error] Job '{job_name}' not found"
+            return format_error(
+                "not_found",
+                f"Job '{job_name}' does not exist",
+                "Use 'kognisant job list' to see available jobs."
+            )
 
         return job_queue.read_job_logs(job_name, lines=lines_count)
+
+    elif name == "remove_job":
+        job_name = args.get("name", "").strip()
+        if not job_name:
+            return format_error("validation", "name is required")
+
+        job_queue = JobQueue()
+        job = job_queue.get_job(job_name)
+
+        if job is None:
+            return format_error(
+                "not_found",
+                f"Job '{job_name}' does not exist",
+                "Use 'list_jobs' to see available jobs."
+            )
+
+        # If running, terminate subprocess first
+        pid = job.get("pid")
+        if pid and job.get("state") == "running":
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        success = job_queue.remove_job(job_name)
+        if success:
+            return f"Job '{job_name}' removed successfully"
+        else:
+            return format_error("io", f"Failed to remove job '{job_name}'")
 
     # Dynamic Global Transferable Tool Execution (Subprocess Sandbox)
     global_dir = os.path.expanduser("~/.kognisant_core/tools")

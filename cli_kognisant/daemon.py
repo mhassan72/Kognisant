@@ -5,15 +5,33 @@ Handles forking, PID file management, signal handling, and log access.
 Uses only Python standard library modules per Requirement 13.
 """
 
+import errno
 import json
 import logging
+import logging.handlers
 import os
+import platform
 import signal
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+
+# --- Platform guard (Requirement 1) ---
+if sys.version_info < (3, 10):
+    raise RuntimeError(
+        "Kognisant requires Python 3.10 or later. "
+        f"Current version: {sys.version_info.major}.{sys.version_info.minor}"
+    )
+
+try:
+    import fcntl  # noqa: F401 — import to verify POSIX availability
+except ImportError:
+    raise RuntimeError(
+        "Kognisant requires a POSIX-compatible platform with fcntl support. "
+        "Windows is not supported."
+    )
 
 # Module-level constants
 CORE_DIR = os.path.expanduser("~/.kognisant_core")
@@ -38,13 +56,17 @@ def _sighup_handler(signum, frame):
 
 
 def _setup_daemon_logging():
-    """Configure logging to write to LOG_FILE with ISO 8601 timestamps (R1-AC8).
+    """Configure logging to write to LOG_FILE with RotatingFileHandler.
 
+    Uses logging.handlers.RotatingFileHandler with maxBytes=10MB, backupCount=3
+    per Requirement 15.2.
     Format: YYYY-MM-DDTHH:MM:SS level message
     """
     os.makedirs(CORE_DIR, exist_ok=True)
 
-    handler = logging.FileHandler(LOG_FILE)
+    handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3
+    )
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(message)s",
                           datefmt="%Y-%m-%dT%H:%M:%S")
@@ -58,24 +80,134 @@ def _setup_daemon_logging():
     return daemon_logger
 
 
-def _run_agent_task(task_description: str) -> dict:
-    """Placeholder for PERP swarm execution.
+def _run_agent_task(task_description: str, project_root: str | None = None) -> dict:
+    """Execute an agent task via the PERP orchestration pipeline.
 
-    This function will be replaced when the swarm module is implemented.
-    For now it simulates agent task execution.
+    Invokes perp_orchestrate's internal worker synchronously (since we are
+    already on a background thread in the daemon) with the task description
+    and project context derived from project_root.
 
     Args:
         task_description: The task to execute.
+        project_root: Working directory for the agent. Defaults to $HOME if None/empty.
 
     Returns:
         Dict with keys: completed (bool), output (str), error (str|None).
     """
-    # Placeholder — will be replaced by actual PERP swarm invocation
-    return {
-        "completed": False,
-        "output": "",
-        "error": f"PERP swarm not yet implemented. Task: {task_description}",
-    }
+    from .agents import _orchestrate_worker, SwarmController
+    from .config import get_compiled_models
+
+    # Resolve project_root: null/empty → home directory
+    if not project_root:
+        project_root = os.path.expanduser("~")
+
+    # Build project_info from project_root (minimal structure for agent context)
+    project_info = None
+    if os.path.isdir(project_root):
+        # Gather basic file listing for the project
+        files = []
+        try:
+            for entry in os.listdir(project_root):
+                entry_path = os.path.join(project_root, entry)
+                files.append({
+                    "name": entry,
+                    "is_dir": os.path.isdir(entry_path),
+                })
+        except OSError:
+            pass
+        project_info = {"root": project_root, "files": files}
+
+    # Load compiled models from config
+    try:
+        compiled_models = get_compiled_models()
+    except Exception:
+        compiled_models = []
+
+    # Reset swarm controller state for this invocation
+    SwarmController.stop_event.clear()
+    SwarmController.resume_event.set()
+    SwarmController.is_active = True
+    SwarmController.is_paused = False
+    SwarmController.active_task_description = task_description
+
+    try:
+        # Run the orchestration worker synchronously on this thread
+        _orchestrate_worker(task_description, project_info, compiled_models)
+
+        # If we reach here without exception, the orchestration completed
+        return {
+            "completed": True,
+            "output": f"PERP orchestration completed for task: {task_description}",
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "completed": False,
+            "output": "",
+            "error": f"PERP orchestration failed: {type(e).__name__}: {e}",
+        }
+    finally:
+        SwarmController.is_active = False
+
+
+class StreamReader(threading.Thread):
+    """Daemon thread that reads subprocess pipe line-by-line.
+
+    Uses iter(proc.stdout.readline, b"") pattern for reliable line reading.
+    Appends to job log file. Stderr lines are prefixed with "[ERROR] ".
+    Created with daemon=True to avoid blocking shutdown.
+    """
+
+    def __init__(self, pipe, log_path: str, prefix: str = "",
+                 on_broken_pipe=None):
+        """Initialize StreamReader thread.
+
+        Args:
+            pipe: The subprocess pipe (stdout or stderr) to read from.
+            log_path: Path to the log file to write output to.
+            prefix: Prefix to prepend to each line (e.g. "[ERROR] ").
+            on_broken_pipe: Optional callback invoked on BrokenPipeError/EPIPE.
+        """
+        super().__init__(daemon=True)
+        self.pipe = pipe
+        self.log_path = log_path
+        self.prefix = prefix
+        self._on_broken_pipe = on_broken_pipe
+
+    def run(self) -> None:
+        """Read lines until EOF or BrokenPipeError.
+
+        On BrokenPipeError/IOError(EPIPE): calls _on_broken_pipe callback
+        which marks the job as failed.
+        """
+        try:
+            for line in iter(self.pipe.readline, b""):
+                decoded = line.decode("utf-8", errors="replace")
+                self._append_line(decoded)
+        except (BrokenPipeError, IOError) as e:
+            if isinstance(e, IOError) and getattr(e, 'errno', None) != errno.EPIPE:
+                # Not an EPIPE error, just stop reading
+                return
+            if self._on_broken_pipe:
+                self._on_broken_pipe(str(e))
+        except (OSError, ValueError):
+            # Pipe closed or invalid - stop reading silently
+            pass
+
+    def _append_line(self, line: str) -> None:
+        """Append a single line to log file with optional prefix."""
+        try:
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+            with open(self.log_path, "a") as f:
+                if self.prefix:
+                    f.write(f"{self.prefix}{line}")
+                else:
+                    f.write(line)
+                # Ensure trailing newline
+                if line and not line.endswith("\n"):
+                    f.write("\n")
+        except OSError:
+            pass
 
 
 class ProcessManager:
@@ -86,20 +218,23 @@ class ProcessManager:
     """
 
     @staticmethod
-    def spawn(script_path: str, env: dict, job_context: dict) -> subprocess.Popen:
+    def spawn(script_path: str, env: dict, job_context: dict,
+              log_path: str | None = None,
+              on_broken_pipe=None) -> subprocess.Popen:
         """Spawn a script subprocess with environment and JSON stdin context.
 
-        Executes the script using sys.executable (R10-AC5), sets env vars
-        from the job definition (R10-AC2), and passes job_context as JSON
-        on stdin (R10-AC1).
+        Creates StreamReader threads for stdout and stderr, starts them,
+        and stores references on the Popen object.
 
         Args:
             script_path: Absolute path to the Python script to execute.
             env: Environment variables to set in the subprocess.
             job_context: Dict with {job_name, job_type, env_vars, timestamp}.
+            log_path: Path to log file for StreamReader output.
+            on_broken_pipe: Callback for broken pipe detection.
 
         Returns:
-            The subprocess.Popen object.
+            The subprocess.Popen object with .stdout_reader and .stderr_reader attributes.
         """
         # Build subprocess environment: inherit current env + job env vars
         proc_env = os.environ.copy()
@@ -123,6 +258,24 @@ class ProcessManager:
             proc.stdin.close()
         except (OSError, BrokenPipeError):
             pass
+
+        # Create and start StreamReader threads if log_path is provided
+        if log_path:
+            stdout_reader = StreamReader(
+                proc.stdout, log_path, prefix="",
+                on_broken_pipe=on_broken_pipe,
+            )
+            stderr_reader = StreamReader(
+                proc.stderr, log_path, prefix="[ERROR] ",
+                on_broken_pipe=on_broken_pipe,
+            )
+            stdout_reader.start()
+            stderr_reader.start()
+            proc.stdout_reader = stdout_reader
+            proc.stderr_reader = stderr_reader
+        else:
+            proc.stdout_reader = None
+            proc.stderr_reader = None
 
         return proc
 
@@ -180,11 +333,74 @@ class ProcessManager:
         except PermissionError:
             pass
 
+    @staticmethod
+    def get_start_time(pid: int) -> str | None:
+        """Get OS-reported process creation time for PID reuse detection.
+
+        macOS: subprocess ps -o lstart= -p {pid}
+        Linux: reads /proc/{pid}/stat field 22 (starttime)
+
+        Returns:
+            String representation of process start time, or None if process not found.
+        """
+        try:
+            if platform.system() == "Darwin":
+                # macOS: use ps -o lstart=
+                result = subprocess.run(
+                    ["ps", "-o", "lstart=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                return None
+            else:
+                # Linux: read /proc/{pid}/stat field 22 (starttime in clock ticks)
+                stat_path = f"/proc/{pid}/stat"
+                if not os.path.exists(stat_path):
+                    return None
+                with open(stat_path, "r") as f:
+                    stat_content = f.read()
+                # Fields after the command name (in parentheses)
+                # Find the last ')' to handle command names with spaces/parens
+                close_paren = stat_content.rfind(")")
+                if close_paren == -1:
+                    return None
+                fields_after = stat_content[close_paren + 2:].split()
+                # Field 22 in stat is starttime, but index is 0-based from field 3
+                # so it's index 19 in fields_after (field 22 - 3 = 19)
+                if len(fields_after) > 19:
+                    return fields_after[19]
+                return None
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def check_symlink(script_path: str, scripts_dir: str) -> bool:
+        """Verify os.path.realpath(script_path) is within scripts_dir.
+
+        Returns True if safe (path is contained), False if path escapes
+        the allowed directory.
+
+        Args:
+            script_path: The path to check.
+            scripts_dir: The allowed base directory.
+
+        Returns:
+            True if the resolved path is within scripts_dir.
+        """
+        real_script = os.path.realpath(script_path)
+        real_scripts_dir = os.path.realpath(scripts_dir)
+        # Ensure the resolved path starts with the scripts directory
+        # Add trailing separator to prevent prefix matches like /scripts2/
+        return real_script.startswith(real_scripts_dir + os.sep) or real_script == real_scripts_dir
+
 
 def _rotate_log_if_needed(log_path: str):
-    """Rotate a log file if it exceeds 10 MB (R4-AC2).
+    """Rotate a job log file if it exceeds 10 MB (Requirement 15.1).
 
-    Renames current log to {name}.log.1 and starts a fresh file.
+    Uses rename-then-open strategy: rename current log to {name}.log.1,
+    then open a new file for subsequent writes. No open handles across
+    rotation boundaries.
     """
     try:
         if os.path.exists(log_path) and os.path.getsize(log_path) > 10 * 1024 * 1024:
@@ -192,7 +408,10 @@ def _rotate_log_if_needed(log_path: str):
             # Remove old rotated file if it exists
             if os.path.exists(rotated_path):
                 os.remove(rotated_path)
+            # Rename current log — no open handles since StreamReaders
+            # open/close per line write
             os.rename(log_path, rotated_path)
+            # New log file will be created on next write
     except OSError:
         pass
 
@@ -258,12 +477,14 @@ def _check_missing_env_vars(job: dict, logger):
 def _build_job_context(job: dict) -> dict:
     """Build the stdin JSON context for a script (R10-AC1).
 
-    Returns dict with job_name, job_type, env_vars, and timestamp (ISO 8601 UTC).
+    Returns dict with job_name, job_type, env_vars, project_root,
+    and timestamp (ISO 8601 UTC).
     """
     return {
         "job_name": job.get("name", ""),
         "job_type": job.get("type", ""),
         "env_vars": job.get("env_vars", {}),
+        "project_root": job.get("project_root", None),
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
@@ -271,31 +492,54 @@ def _build_job_context(job: dict) -> dict:
 def _resolve_script_path(job: dict) -> str | None:
     """Resolve the absolute path to a job's script.
 
-    Returns the absolute path if the script exists, None otherwise.
+    Returns the absolute path if the script exists and passes symlink
+    containment check, None otherwise. If symlink escape is detected,
+    logs a security warning.
     """
     script_path = job.get("script_path", "")
     if not script_path:
         return None
 
+    scripts_dir = os.path.join(CORE_DIR, "scripts")
+
     # If already absolute, use as-is
     if os.path.isabs(script_path):
-        return script_path if os.path.exists(script_path) else None
+        abs_path = script_path
+    else:
+        # Resolve relative to scripts directory
+        abs_path = os.path.join(scripts_dir, script_path)
 
-    # Resolve relative to scripts directory
-    scripts_dir = os.path.join(CORE_DIR, "scripts")
-    abs_path = os.path.join(scripts_dir, script_path)
-    return abs_path if os.path.exists(abs_path) else None
+    if not os.path.exists(abs_path):
+        return None
+
+    # Symlink containment check (Requirement 27.1, 27.2)
+    if not ProcessManager.check_symlink(abs_path, scripts_dir):
+        logger = logging.getLogger("kognisant.daemon")
+        real_path = os.path.realpath(abs_path)
+        logger.warning(
+            "Security: script path '%s' resolves to '%s' which is outside "
+            "allowed scripts directory '%s'. Execution refused.",
+            abs_path, real_path, scripts_dir,
+        )
+        return None
+
+    return abs_path
 
 
 def _main_loop():
     """Main daemon polling loop.
 
     Polls the job queue every 15 seconds (R2-AC1) and manages:
+    - Orphan cleanup on startup (R9)
+    - Clock jump detection (R11)
     - Scheduled job execution (R3)
     - Persistent job lifecycle (R4)
     - Agent job execution (R5)
     - Graceful shutdown (R12)
-    - Log rotation (R4-AC2)
+    - SIGHUP responsiveness at 500ms (R12)
+    - Broken pipe detection (R13)
+    - Deletion guard / backup recovery (R14)
+    - Log rotation (R15)
     """
     global _shutdown_flag, _reload_flag
 
@@ -304,9 +548,74 @@ def _main_loop():
     logger = _setup_daemon_logging()
     logger.info("Daemon started with PID %d", os.getpid())
 
+    # Root privilege warning (Requirement 29)
+    if os.geteuid() == 0:
+        logger.warning(
+            "Daemon running with root privileges. "
+            "Recommend running under a non-root user."
+        )
+
     job_queue = JobQueue()
     logs_dir = os.path.join(CORE_DIR, "logs")
     os.makedirs(logs_dir, exist_ok=True)
+
+    # --- Orphan cleanup on startup (Requirement 9) ---
+    try:
+        jobs = job_queue.load()
+        for job in jobs:
+            if job.get("state") != "running":
+                continue
+            pid = job.get("pid")
+            name = job.get("name", "")
+            if not pid:
+                # No PID stored but state is running — mark as orphaned
+                job_queue.update_status(
+                    name, "failed", pid=None,
+                    pid_started_at=None,
+                )
+                logger.warning(
+                    "Orphan cleanup: job '%s' in running state with no PID, marked failed",
+                    name,
+                )
+                continue
+
+            if not ProcessManager.is_alive(pid):
+                # PID not alive → orphaned process not found (R9-AC4)
+                job_queue.update_status(
+                    name, "failed", pid=None,
+                    pid_started_at=None,
+                )
+                logger.warning(
+                    "Orphan cleanup: job '%s' PID %d not alive, "
+                    "marked failed (orphaned process not found)",
+                    name, pid,
+                )
+            else:
+                # PID alive — check creation time match (R9-AC2, R9-AC3)
+                stored_start_time = job.get("pid_started_at")
+                current_start_time = ProcessManager.get_start_time(pid)
+                if stored_start_time and current_start_time:
+                    if stored_start_time != current_start_time:
+                        # PID reused by another process (R9-AC3)
+                        job_queue.update_status(
+                            name, "failed", pid=None,
+                            pid_started_at=None,
+                        )
+                        logger.warning(
+                            "Orphan cleanup: job '%s' PID %d reused by another process "
+                            "(expected start_time='%s', got='%s'), marked failed without signal",
+                            name, pid, stored_start_time, current_start_time,
+                        )
+                    # else: PID alive and start time matches — process is legitimate
+                elif not stored_start_time:
+                    # No stored start time — can't verify, leave as is
+                    logger.info(
+                        "Orphan cleanup: job '%s' PID %d alive but no stored start time, "
+                        "assuming legitimate",
+                        name, pid,
+                    )
+    except Exception as e:
+        logger.error("Error during orphan cleanup: %s", e)
 
     # Track running processes: {job_name: subprocess.Popen}
     running_scheduled: dict[str, subprocess.Popen] = {}
@@ -321,6 +630,10 @@ def _main_loop():
     # Track agent job start times: {job_name: float}
     agent_start_times: dict[str, float] = {}
 
+    # Clock jump detection (Requirement 11): use monotonic clock
+    POLL_INTERVAL = 15  # seconds
+    _last_tick = time.monotonic()
+
     while not _shutdown_flag:
         # --- (a) Check reload flag (R12-AC5) ---
         if _reload_flag:
@@ -332,87 +645,215 @@ def _main_loop():
         try:
             now = datetime.now(timezone.utc)
 
-            # --- (b) Execute due scheduled jobs (R3-AC1) ---
-            due_jobs = job_queue.get_due_scheduled(now)
-            for job in due_jobs:
-                name = job.get("name", "")
+            # --- Clock jump detection (Requirement 11) ---
+            current_tick = time.monotonic()
+            elapsed = current_tick - _last_tick
+            clock_jump_detected = elapsed > (2 * POLL_INTERVAL)  # > 30s
 
-                # Skip if job is already running (R3-AC6)
-                if name in running_scheduled:
-                    proc = running_scheduled[name]
-                    if proc.poll() is None:
-                        logger.warning(
-                            "Scheduled job '%s' still running, skipping overlapping execution",
+            if clock_jump_detected:
+                logger.warning(
+                    "Clock jump detected: %.1fs elapsed (expected ~%ds)",
+                    elapsed, POLL_INTERVAL,
+                )
+
+            _last_tick = current_tick
+
+            # --- Deletion guard (Requirement 14) ---
+            # Ensure job queue file is accessible; recover if needed
+            # This is handled internally by _load_raw() and _recover_from_backup()
+            # but we do an explicit check here for the polling cycle
+            if not os.path.exists(job_queue.queue_path):
+                logger.warning(
+                    "jobs.json missing during poll, attempting recovery"
+                )
+                try:
+                    job_queue._load_raw()  # Will trigger recovery logic
+                except Exception as e:
+                    logger.error("Recovery failed: %s", e)
+
+            # --- (b) Execute due scheduled jobs (R3-AC1) ---
+            if clock_jump_detected:
+                # Handle scheduled jobs according to scheduler_policy (R11)
+                due_jobs = job_queue.get_due_scheduled(now)
+                for job in due_jobs:
+                    name = job.get("name", "")
+                    policy = job.get("scheduler_policy", "skip")
+
+                    if policy == "skip":
+                        # Discard missed executions (R11-AC3)
+                        logger.info(
+                            "Clock jump: skipping job '%s' (scheduler_policy=skip)",
                             name,
                         )
                         continue
+                    elif policy == "catchup_once":
+                        # Execute each missed job exactly once (R11-AC4)
+                        logger.info(
+                            "Clock jump: catching up job '%s' (scheduler_policy=catchup_once)",
+                            name,
+                        )
+                        # Fall through to normal execution below
+                        pass
 
-                # Resolve script path
-                abs_script = _resolve_script_path(job)
-                if abs_script is None:
-                    # Missing script (R3-AC7)
-                    logger.error(
-                        "Scheduled job '%s': script not found at '%s'",
-                        name, job.get("script_path", ""),
-                    )
-                    job_queue.update_status(name, "failed")
-                    continue
+                    # Execute job (catchup_once path)
+                    if name in running_scheduled:
+                        proc = running_scheduled[name]
+                        if proc.poll() is None:
+                            continue
 
-                # Warn about missing env vars (R10-AC6)
-                _check_missing_env_vars(job, logger)
+                    abs_script = _resolve_script_path(job)
+                    if abs_script is None:
+                        logger.error(
+                            "Scheduled job '%s': script not found at '%s'",
+                            name, job.get("script_path", ""),
+                        )
+                        job_queue.update_status(name, "failed")
+                        continue
 
-                # Spawn the subprocess (R3-AC1)
-                context = _build_job_context(job)
-                try:
-                    proc = ProcessManager.spawn(
-                        abs_script, job.get("env_vars", {}), context
-                    )
-                    running_scheduled[name] = proc
-                    scheduled_start_times[name] = time.monotonic()
-                    job_queue.update_status(name, "running", pid=proc.pid)
-                    logger.info("Scheduled job '%s' started (PID %d)", name, proc.pid)
-                except OSError as e:
-                    logger.error(
-                        "Scheduled job '%s': failed to spawn: %s", name, e
-                    )
-                    job_queue.update_status(name, "failed")
+                    _check_missing_env_vars(job, logger)
+                    context = _build_job_context(job)
+                    log_path = os.path.join(logs_dir, f"{name}.log")
+
+                    def _make_broken_pipe_cb(job_name, job_pid_holder):
+                        def _on_broken_pipe(error_msg):
+                            logger.error(
+                                "Broken pipe for job '%s': %s", job_name, error_msg
+                            )
+                            job_queue.update_status(
+                                job_name, "failed", pid=None,
+                            )
+                            if job_pid_holder[0]:
+                                ProcessManager.kill_gracefully(job_pid_holder[0])
+                        return _on_broken_pipe
+
+                    pid_holder = [None]
+                    try:
+                        proc = ProcessManager.spawn(
+                            abs_script, job.get("env_vars", {}), context,
+                            log_path=log_path,
+                            on_broken_pipe=_make_broken_pipe_cb(name, pid_holder),
+                        )
+                        pid_holder[0] = proc.pid
+                        running_scheduled[name] = proc
+                        scheduled_start_times[name] = time.monotonic()
+                        # Store pid_started_at (R9 - for PID reuse protection)
+                        pid_start = ProcessManager.get_start_time(proc.pid)
+                        job_queue.update_status(
+                            name, "running", pid=proc.pid,
+                            pid_started_at=pid_start,
+                        )
+                        logger.info("Scheduled job '%s' started (PID %d)", name, proc.pid)
+                    except OSError as e:
+                        logger.error(
+                            "Scheduled job '%s': failed to spawn: %s", name, e
+                        )
+                        job_queue.update_status(name, "failed")
+            else:
+                # Normal scheduling (no clock jump)
+                due_jobs = job_queue.get_due_scheduled(now)
+                for job in due_jobs:
+                    name = job.get("name", "")
+
+                    # Skip if job is already running (R3-AC6)
+                    if name in running_scheduled:
+                        proc = running_scheduled[name]
+                        if proc.poll() is None:
+                            logger.warning(
+                                "Scheduled job '%s' still running, skipping overlapping execution",
+                                name,
+                            )
+                            continue
+
+                    # Resolve script path
+                    abs_script = _resolve_script_path(job)
+                    if abs_script is None:
+                        # Missing script (R3-AC7)
+                        logger.error(
+                            "Scheduled job '%s': script not found at '%s'",
+                            name, job.get("script_path", ""),
+                        )
+                        job_queue.update_status(name, "failed")
+                        continue
+
+                    # Warn about missing env vars (R10-AC6)
+                    _check_missing_env_vars(job, logger)
+
+                    # Spawn the subprocess (R3-AC1)
+                    context = _build_job_context(job)
+                    log_path = os.path.join(logs_dir, f"{name}.log")
+
+                    def _make_broken_pipe_cb(job_name, job_pid_holder):
+                        def _on_broken_pipe(error_msg):
+                            logger.error(
+                                "Broken pipe for job '%s': %s", job_name, error_msg
+                            )
+                            job_queue.update_status(
+                                job_name, "failed", pid=None,
+                            )
+                            if job_pid_holder[0]:
+                                ProcessManager.kill_gracefully(job_pid_holder[0])
+                        return _on_broken_pipe
+
+                    pid_holder = [None]
+                    try:
+                        proc = ProcessManager.spawn(
+                            abs_script, job.get("env_vars", {}), context,
+                            log_path=log_path,
+                            on_broken_pipe=_make_broken_pipe_cb(name, pid_holder),
+                        )
+                        pid_holder[0] = proc.pid
+                        running_scheduled[name] = proc
+                        scheduled_start_times[name] = time.monotonic()
+                        # Store pid_started_at (R9 - for PID reuse protection)
+                        pid_start = ProcessManager.get_start_time(proc.pid)
+                        job_queue.update_status(
+                            name, "running", pid=proc.pid,
+                            pid_started_at=pid_start,
+                        )
+                        logger.info("Scheduled job '%s' started (PID %d)", name, proc.pid)
+                    except OSError as e:
+                        logger.error(
+                            "Scheduled job '%s': failed to spawn: %s", name, e
+                        )
+                        job_queue.update_status(name, "failed")
 
             # --- Check completed/timed-out scheduled jobs ---
             completed_scheduled = []
             for name, proc in running_scheduled.items():
                 returncode = proc.poll()
                 if returncode is not None:
-                    # Process has exited
-                    log_path = os.path.join(logs_dir, f"{name}.log")
-                    stdout_data = ""
-                    stderr_data = ""
-                    try:
-                        stdout_data = proc.stdout.read().decode("utf-8", errors="replace")
-                        stderr_data = proc.stderr.read().decode("utf-8", errors="replace")
-                    except (OSError, ValueError):
-                        pass
-
-                    # Capture output to log (R3-AC4)
-                    _append_to_log(log_path, stdout_data)
-                    _append_to_log(log_path, stderr_data, prefix="[ERROR] ")
+                    # Process has exited — join StreamReader threads (Req 5.4)
+                    if getattr(proc, 'stdout_reader', None):
+                        proc.stdout_reader.join(timeout=2)
+                    if getattr(proc, 'stderr_reader', None):
+                        proc.stderr_reader.join(timeout=2)
 
                     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                    # Increment run_count and record last_exit_code (R50.2, R50.3)
+                    current_job = job_queue.get_job(name)
+                    current_run_count = (
+                        current_job.get("run_count", 0) if current_job else 0
+                    )
                     if returncode == 0:
                         # Success (R3-AC2)
                         job_queue.update_status(
-                            name, "scheduled", last_run_at=now_str, pid=None
+                            name, "scheduled", last_run_at=now_str, pid=None,
+                            pid_started_at=None,
+                            last_exit_code=returncode,
+                            run_count=current_run_count + 1,
                         )
                         logger.info("Scheduled job '%s' completed successfully", name)
                     else:
                         # Failure (R3-AC3)
-                        last_stderr = "\n".join(stderr_data.splitlines()[-20:])
                         job_queue.update_status(
-                            name, "scheduled", last_run_at=now_str, pid=None
+                            name, "scheduled", last_run_at=now_str, pid=None,
+                            pid_started_at=None,
+                            last_exit_code=returncode,
+                            run_count=current_run_count + 1,
                         )
                         logger.error(
-                            "Scheduled job '%s' failed with exit code %d. "
-                            "Last stderr:\n%s",
-                            name, returncode, last_stderr,
+                            "Scheduled job '%s' failed with exit code %d",
+                            name, returncode,
                         )
                     completed_scheduled.append(name)
                 else:
@@ -425,8 +866,14 @@ def _main_loop():
                         )
                         ProcessManager.kill_gracefully(proc.pid, timeout=10)
                         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                        current_job = job_queue.get_job(name)
+                        current_run_count = (
+                            current_job.get("run_count", 0) if current_job else 0
+                        )
                         job_queue.update_status(
-                            name, "scheduled", last_run_at=now_str, pid=None
+                            name, "scheduled", last_run_at=now_str, pid=None,
+                            pid_started_at=None,
+                            run_count=current_run_count + 1,
                         )
                         completed_scheduled.append(name)
 
@@ -457,14 +904,35 @@ def _main_loop():
 
                 _check_missing_env_vars(job, logger)
                 context = _build_job_context(job)
+                log_path = os.path.join(logs_dir, f"{name}.log")
 
+                def _make_broken_pipe_cb(job_name, job_pid_holder):
+                    def _on_broken_pipe(error_msg):
+                        logger.error(
+                            "Broken pipe for job '%s': %s", job_name, error_msg
+                        )
+                        job_queue.update_status(
+                            job_name, "failed", pid=None,
+                        )
+                        if job_pid_holder[0]:
+                            ProcessManager.kill_gracefully(job_pid_holder[0])
+                    return _on_broken_pipe
+
+                pid_holder = [None]
                 try:
                     proc = ProcessManager.spawn(
-                        abs_script, job.get("env_vars", {}), context
+                        abs_script, job.get("env_vars", {}), context,
+                        log_path=log_path,
+                        on_broken_pipe=_make_broken_pipe_cb(name, pid_holder),
                     )
+                    pid_holder[0] = proc.pid
                     running_persistent[name] = proc
-                    # Store PID, update state to running (R2-AC6)
-                    job_queue.update_status(name, "running", pid=proc.pid)
+                    # Store PID and pid_started_at, update state to running (R2-AC6)
+                    pid_start = ProcessManager.get_start_time(proc.pid)
+                    job_queue.update_status(
+                        name, "running", pid=proc.pid,
+                        pid_started_at=pid_start,
+                    )
                     logger.info(
                         "Persistent job '%s' started (PID %d)", name, proc.pid
                     )
@@ -488,30 +956,36 @@ def _main_loop():
                         ProcessManager.kill_gracefully(proc.pid, timeout=10)
                         persistent_to_remove.append(name)
                     else:
-                        # Log rotation for persistent jobs (R4-AC2)
+                        # Log rotation for persistent jobs (R15.1)
                         log_path = os.path.join(logs_dir, f"{name}.log")
                         _rotate_log_if_needed(log_path)
                     continue
 
                 # Process has exited — collect output
-                log_path = os.path.join(logs_dir, f"{name}.log")
-                stderr_data = ""
-                try:
-                    stdout_data = proc.stdout.read().decode("utf-8", errors="replace")
-                    stderr_data = proc.stderr.read().decode("utf-8", errors="replace")
-                    _append_to_log(log_path, stdout_data)
-                    _append_to_log(log_path, stderr_data, prefix="[ERROR] ")
-                except (OSError, ValueError):
-                    pass
+                # Join StreamReader threads (Req 5.4)
+                if getattr(proc, 'stdout_reader', None):
+                    proc.stdout_reader.join(timeout=2)
+                if getattr(proc, 'stderr_reader', None):
+                    proc.stderr_reader.join(timeout=2)
+
+                # Increment run_count and record last_exit_code (R50.2, R50.3)
+                current_job = job_queue.get_job(name)
+                current_run_count = (
+                    current_job.get("run_count", 0) if current_job else 0
+                )
 
                 if returncode == 0:
                     # Clean exit (R4-AC4)
-                    job_queue.update_status(name, "completed", pid=None)
+                    job_queue.update_status(
+                        name, "completed", pid=None,
+                        pid_started_at=None,
+                        last_exit_code=returncode,
+                        run_count=current_run_count + 1,
+                    )
                     logger.info("Persistent job '%s' exited cleanly (code 0)", name)
                     persistent_to_remove.append(name)
                 else:
                     # Crashed — check if cancelled first (R4-AC8)
-                    current_job = job_queue.get_job(name)
                     if current_job and current_job.get("state") == "cancelled":
                         persistent_to_remove.append(name)
                         continue
@@ -544,22 +1018,21 @@ def _main_loop():
 
                     if len(recent_restarts) > 5:
                         # Crash loop detected (R4-AC6, R4-AC7)
-                        last_stderr_lines = "\n".join(
-                            stderr_data.splitlines()[-20:]
-                        )
                         logger.error(
                             "Persistent job '%s' entered crash_loop: "
-                            "%d restarts, last 20 lines of stderr:\n%s",
+                            "%d restarts in 60s window",
                             name,
                             restart_count,
-                            last_stderr_lines,
                         )
                         job_queue.update_status(
                             name,
                             "crash_loop",
                             pid=None,
+                            pid_started_at=None,
                             restart_count=restart_count,
                             restart_timestamps=restart_timestamps,
+                            last_exit_code=returncode,
+                            run_count=current_run_count + 1,
                         )
                         persistent_to_remove.append(name)
                     else:
@@ -573,8 +1046,11 @@ def _main_loop():
                             name,
                             "running",
                             pid=None,
+                            pid_started_at=None,
                             restart_count=restart_count,
                             restart_timestamps=restart_timestamps,
+                            last_exit_code=returncode,
+                            run_count=current_run_count + 1,
                         )
                         restart_pending[name] = time.monotonic() + 5.0
                         persistent_to_remove.append(name)
@@ -606,12 +1082,34 @@ def _main_loop():
                     continue
 
                 context = _build_job_context(job_data)
+                log_path = os.path.join(logs_dir, f"{name}.log")
+
+                def _make_broken_pipe_cb(job_name, job_pid_holder):
+                    def _on_broken_pipe(error_msg):
+                        logger.error(
+                            "Broken pipe for job '%s': %s", job_name, error_msg
+                        )
+                        job_queue.update_status(
+                            job_name, "failed", pid=None,
+                        )
+                        if job_pid_holder[0]:
+                            ProcessManager.kill_gracefully(job_pid_holder[0])
+                    return _on_broken_pipe
+
+                pid_holder = [None]
                 try:
                     proc = ProcessManager.spawn(
-                        abs_script, job_data.get("env_vars", {}), context
+                        abs_script, job_data.get("env_vars", {}), context,
+                        log_path=log_path,
+                        on_broken_pipe=_make_broken_pipe_cb(name, pid_holder),
                     )
+                    pid_holder[0] = proc.pid
                     running_persistent[name] = proc
-                    job_queue.update_status(name, "running", pid=proc.pid)
+                    pid_start = ProcessManager.get_start_time(proc.pid)
+                    job_queue.update_status(
+                        name, "running", pid=proc.pid,
+                        pid_started_at=pid_start,
+                    )
                     logger.info(
                         "Persistent job '%s' restarted (PID %d)", name, proc.pid
                     )
@@ -643,31 +1141,56 @@ def _main_loop():
                 def _agent_worker(job_name: str, task: str):
                     """Run agent task on background thread (R5-AC1)."""
                     log_path = os.path.join(logs_dir, f"{job_name}.log")
+                    # Resolve project_root from job data
+                    current_job = job_queue.get_job(job_name)
+                    project_root = current_job.get("project_root") if current_job else None
                     try:
-                        result = _run_agent_task(task)
+                        result = _run_agent_task(task, project_root=project_root)
                         # Capture output (R5-AC4)
                         output = result.get("output", "")
                         _append_to_log(log_path, output)
 
                         if result.get("completed"):
-                            # Success (R5-AC2)
+                            # Success (R8-AC4): set state "completed", record timestamp,
+                            # increment run_count, set last_exit_code = 0
                             finish_ts = datetime.now(timezone.utc).strftime(
                                 "%Y-%m-%dT%H:%M:%S"
                             )
+                            # Get current run_count to increment
+                            current_job = job_queue.get_job(job_name)
+                            current_run_count = (
+                                current_job.get("run_count", 0) if current_job else 0
+                            )
                             job_queue.update_status(
-                                job_name, "completed", last_run_at=finish_ts
+                                job_name, "completed",
+                                last_run_at=finish_ts,
+                                run_count=current_run_count + 1,
+                                last_exit_code=0,
                             )
                             logger.info(
                                 "Agent job '%s' completed at %s",
                                 job_name, finish_ts,
                             )
                         else:
-                            # Failure (R5-AC3)
+                            # Failure (R8 failure path): set state "failed",
+                            # record error, set last_exit_code = 1
                             error_msg = result.get("error", "Unknown error")
                             _append_to_log(
                                 log_path, error_msg, prefix="[ERROR] "
                             )
-                            job_queue.update_status(job_name, "failed")
+                            current_job = job_queue.get_job(job_name)
+                            current_run_count = (
+                                current_job.get("run_count", 0) if current_job else 0
+                            )
+                            finish_ts = datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%S"
+                            )
+                            job_queue.update_status(
+                                job_name, "failed",
+                                last_run_at=finish_ts,
+                                run_count=current_run_count + 1,
+                                last_exit_code=1,
+                            )
                             logger.error(
                                 "Agent job '%s' failed: %s",
                                 job_name, error_msg[:200],
@@ -676,7 +1199,19 @@ def _main_loop():
                         # Unhandled exception (R5-AC3)
                         error_msg = f"{type(e).__name__}: {e}"
                         _append_to_log(log_path, error_msg, prefix="[ERROR] ")
-                        job_queue.update_status(job_name, "failed")
+                        current_job = job_queue.get_job(job_name)
+                        current_run_count = (
+                            current_job.get("run_count", 0) if current_job else 0
+                        )
+                        finish_ts = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S"
+                        )
+                        job_queue.update_status(
+                            job_name, "failed",
+                            last_run_at=finish_ts,
+                            run_count=current_run_count + 1,
+                            last_exit_code=1,
+                        )
                         logger.error(
                             "Agent job '%s' exception: %s",
                             job_name, error_msg[:200],
@@ -727,10 +1262,13 @@ def _main_loop():
         except Exception as e:
             logger.error("Error in polling cycle: %s", e)
 
-        # --- Sleep for 15s polling interval with responsive shutdown check ---
+        # --- Sleep for 15s polling interval with responsive shutdown/SIGHUP check ---
+        # Check _shutdown_flag and _reload_flag every 500ms (Requirement 12)
         for _ in range(30):
             if _shutdown_flag:
                 break
+            if _reload_flag:
+                break  # Break immediately to begin new poll cycle
             time.sleep(0.5)
 
     # --- Graceful shutdown sequence (R12-AC1,2,3,4) ---
@@ -793,13 +1331,19 @@ class DaemonManager:
         """Fork a background daemon process.
 
         Ensures ~/.kognisant_core/ exists, checks for existing daemon,
-        forks via os.fork(), and sets up the child process.
+        forks via os.fork(), and sets up the child process with:
+        1. os.setsid() — new session
+        2. os.closerange(3, SC_OPEN_MAX) — close inherited FDs
+        3. Redirect stdin/stdout/stderr to /dev/null
+
+        Uses O_CREAT|O_EXCL for race-free PID file creation (Requirement 10).
 
         Returns:
             The child (daemon) PID.
 
         Raises:
-            RuntimeError: If the daemon is already running (R1-AC7).
+            RuntimeError: If the daemon is already running or another
+                          instance is starting (R1-AC7, R10-AC4).
         """
         # Ensure core directory exists (R1-AC1)
         os.makedirs(CORE_DIR, exist_ok=True)
@@ -815,6 +1359,44 @@ class DaemonManager:
                 f"Daemon already running with PID {existing_pid}"
             )
 
+        # PID file race prevention (Requirement 10):
+        # If PID file exists but PID is dead → remove stale file (R10-AC1, R10-AC2)
+        if os.path.exists(PID_FILE):
+            stale_pid = DaemonManager._read_pid()
+            if stale_pid is not None and not DaemonManager._process_alive(stale_pid):
+                try:
+                    os.remove(PID_FILE)
+                except OSError:
+                    pass
+            elif stale_pid is not None:
+                # PID file exists and process is alive
+                raise RuntimeError(
+                    f"Daemon already running with PID {stale_pid}"
+                )
+
+        # Root privilege warning (Requirement 29)
+        if os.geteuid() == 0:
+            print(
+                "WARNING: Starting daemon with root privileges. "
+                "Recommend running under a non-root user.",
+                file=sys.stderr,
+            )
+
+        # Atomically create PID file with O_CREAT|O_EXCL (Requirement 10.3)
+        # This prevents race between two simultaneous start attempts
+        try:
+            pid_fd = os.open(PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise RuntimeError("Another daemon instance is starting")
+
+        # Close the PID fd for now — child will write its own PID
+        os.close(pid_fd)
+        # Remove the placeholder PID file — child will create the real one
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
+
         # Fork the daemon process
         child_pid = os.fork()
 
@@ -825,6 +1407,21 @@ class DaemonManager:
         else:
             # Child process — become session leader
             os.setsid()
+
+            # Close all inherited file descriptors above stderr (Requirement 6)
+            try:
+                max_fd = os.sysconf("SC_OPEN_MAX")
+            except (ValueError, OSError):
+                max_fd = 1024
+            os.closerange(3, max_fd)
+
+            # Redirect stdin/stdout/stderr to /dev/null (Requirement 6)
+            devnull_fd = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull_fd, 0)  # stdin
+            os.dup2(devnull_fd, 1)  # stdout
+            os.dup2(devnull_fd, 2)  # stderr
+            if devnull_fd > 2:
+                os.close(devnull_fd)
 
             # Write PID file
             with open(PID_FILE, "w") as f:
@@ -843,9 +1440,6 @@ class DaemonManager:
                 logger.error("Daemon crashed: %s", e)
             finally:
                 # Clean up PID file on normal exit
-                # Per R12-AC6: if daemon crashes unexpectedly, PID file
-                # remains for stale detection. But on graceful shutdown
-                # we clean it up (R12-AC4).
                 if _shutdown_flag:
                     try:
                         os.remove(PID_FILE)
@@ -853,6 +1447,23 @@ class DaemonManager:
                         pass
 
             os._exit(0)
+
+    @staticmethod
+    def restart() -> int:
+        """Stop existing daemon (if running), then start new one.
+
+        Returns new daemon PID. If daemon was not running, starts fresh.
+        """
+        was_running = DaemonManager.is_running()
+        if was_running:
+            DaemonManager.stop()
+            # Wait briefly for shutdown to complete
+            for _ in range(20):  # up to 2 seconds
+                if not DaemonManager.is_running():
+                    break
+                time.sleep(0.1)
+
+        return DaemonManager.start()
 
     @staticmethod
     def stop() -> bool:

@@ -226,19 +226,44 @@ class TestResolveScriptPath(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        # Create a scripts subdirectory to simulate the real scripts_dir
+        self.scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(self.scripts_dir)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_resolves_absolute_path(self):
-        """Resolves absolute path when file exists."""
-        script = os.path.join(self.tmpdir, "test.py")
+    def test_resolves_absolute_path_within_scripts_dir(self):
+        """Resolves absolute path when file exists within scripts directory."""
+        script = os.path.join(self.scripts_dir, "test.py")
         with open(script, "w") as f:
             f.write("pass")
 
-        job = {"script_path": script}
-        self.assertEqual(_resolve_script_path(job), script)
+        import cli_kognisant.daemon as daemon_mod
+        original_core_dir = daemon_mod.CORE_DIR
+        daemon_mod.CORE_DIR = self.tmpdir
+        try:
+            job = {"script_path": script}
+            self.assertEqual(_resolve_script_path(job), script)
+        finally:
+            daemon_mod.CORE_DIR = original_core_dir
+
+    def test_rejects_absolute_path_outside_scripts_dir(self):
+        """Returns None for absolute path outside scripts directory (symlink protection)."""
+        # Create a script outside the scripts directory
+        outside_script = os.path.join(self.tmpdir, "outside.py")
+        with open(outside_script, "w") as f:
+            f.write("pass")
+
+        import cli_kognisant.daemon as daemon_mod
+        original_core_dir = daemon_mod.CORE_DIR
+        daemon_mod.CORE_DIR = self.tmpdir
+        try:
+            job = {"script_path": outside_script}
+            self.assertIsNone(_resolve_script_path(job))
+        finally:
+            daemon_mod.CORE_DIR = original_core_dir
 
     def test_returns_none_for_missing_absolute(self):
         """Returns None when absolute path doesn't exist."""
@@ -249,6 +274,41 @@ class TestResolveScriptPath(unittest.TestCase):
         """Returns None for empty script_path."""
         job = {"script_path": ""}
         self.assertIsNone(_resolve_script_path(job))
+
+    def test_resolves_relative_path_within_scripts_dir(self):
+        """Resolves relative path when file exists in scripts directory."""
+        script = os.path.join(self.scripts_dir, "my_script.py")
+        with open(script, "w") as f:
+            f.write("pass")
+
+        import cli_kognisant.daemon as daemon_mod
+        original_core_dir = daemon_mod.CORE_DIR
+        daemon_mod.CORE_DIR = self.tmpdir
+        try:
+            job = {"script_path": "my_script.py"}
+            self.assertEqual(_resolve_script_path(job), script)
+        finally:
+            daemon_mod.CORE_DIR = original_core_dir
+
+    def test_rejects_symlink_escape(self):
+        """Returns None if script is a symlink pointing outside scripts directory."""
+        # Create a target outside scripts dir
+        outside_target = os.path.join(self.tmpdir, "evil.py")
+        with open(outside_target, "w") as f:
+            f.write("import os; os.system('rm -rf /')")
+
+        # Create a symlink inside scripts dir pointing to outside target
+        symlink_path = os.path.join(self.scripts_dir, "safe_looking.py")
+        os.symlink(outside_target, symlink_path)
+
+        import cli_kognisant.daemon as daemon_mod
+        original_core_dir = daemon_mod.CORE_DIR
+        daemon_mod.CORE_DIR = self.tmpdir
+        try:
+            job = {"script_path": "safe_looking.py"}
+            self.assertIsNone(_resolve_script_path(job))
+        finally:
+            daemon_mod.CORE_DIR = original_core_dir
 
 
 if __name__ == "__main__":

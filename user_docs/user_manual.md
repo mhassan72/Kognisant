@@ -17,7 +17,12 @@ This manual provides an exhaustive guide to installing, configuring, and interac
 8. [Spec-Driven Development (SDD) Command](#8-spec-driven-development-sdd-command)
 9. [Hardened Safety & System Boundaries](#9-hardened-safety--system-boundaries)
 10. [Troubleshooting & Support](#10-troubleshooting--support)
-11. [Daemon & Background Jobs](#11-daemon--background-jobs)
+11. [Schema Versioning](#11-schema-versioning)
+12. [Timeouts & Exit Behavior](#12-timeouts--exit-behavior)
+13. [Scheduler Policy](#13-scheduler-policy)
+14. [Security & Secrets](#14-security--secrets)
+15. [Cron Scheduling](#15-cron-scheduling)
+16. [Daemon & Background Jobs](#16-daemon--background-jobs)
 
 ---
 
@@ -47,9 +52,30 @@ Kognisant maintains two distinct boundaries:
 Kognisant is distributed as a free-to-use, zero-dependency command-line utility. To ensure simple updates and portability, it is distributed **exclusively via the Python Pip package manager**.
 
 ### System Requirements
-*   **Python**: Version `3.8` or newer (Python `3.12` recommended).
-*   **Operating System**: macOS, Linux, or Windows (WSL/Powershell).
+*   **Python**: Version `3.10` or newer (Python `3.12` recommended).
+*   **Operating System**: macOS, Linux (POSIX-compliant only). **Windows is not supported** — see [Platform Requirements](#platform-requirements) below.
 *   **Web Scraping Engine** (Optional but highly recommended): Standard Google Chrome or Brave Browser installed on your machine for headless background web browsing and DOM rendering.
+
+### Platform Requirements
+
+The Autonomous Execution Engine (daemon, background jobs, job scheduling) supports **POSIX-compliant operating systems only**:
+
+- ✅ **Linux** (all major distributions)
+- ✅ **macOS** (10.15 Catalina and later)
+- ❌ **Windows** — not supported (including WSL for daemon features)
+
+The execution engine requires the following POSIX-specific system calls:
+
+| Requirement | Purpose |
+| :--- | :--- |
+| `fcntl.flock()` | Advisory file locking for concurrent job queue access |
+| `os.fork()` | Daemon process creation (background execution) |
+| `os.setsid()` | Session isolation for the daemon child process |
+| `os.closerange()` | File descriptor cleanup in forked processes |
+
+If you attempt to import the daemon module on a non-POSIX platform, Kognisant raises a `RuntimeError` with a clear message indicating the platform is unsupported.
+
+> **Note:** The interactive chat interface (`kognisant chat`) and other non-daemon features work on all platforms. Only the background execution engine has the POSIX requirement.
 
 ### In-Place Installation
 Open your terminal and run the standard pip installer:
@@ -126,9 +152,15 @@ Kognisant provides an extensive suite of in-chat commands to inspect state, swit
 | `/agent` | `/agent <task>` | Spawns a concurrent, background **PERP Swarm** to solve a complex coding task. |
 | `/tool` | `/tool <subcommand>` | Opens the global tool management wizard (list, register, delete global tools). |
 | `/paste` / `/p` | `/paste` | Opens secure paste mode. Type `/end` on a blank line to submit large log traces. |
-| `/jobs` | `/jobs` | Lists all background jobs with name, type, and current state. |
-| `/job` | `/job stop\|logs\|restart <name>` | Manage a specific job: stop it, view logs, or restart a crashed job. |
-| `/daemon` | `/daemon status\|start` | Check daemon health or start the background daemon process. |
+| `/jobs` | `/jobs` | Lists all background jobs with name, type, state, run count, exit code, next run, and PID. |
+| `/job stop` | `/job stop <name>` | Send SIGTERM to running subprocess, set state to "cancelled". |
+| `/job logs` | `/job logs <name>` | View last 30 lines of job output. |
+| `/job restart` | `/job restart <name>` | Restart a stopped or crash-looped persistent job. |
+| `/job remove` | `/job remove <name>` | Permanently remove a job from the queue (terminates if running). |
+| `/daemon status` | `/daemon status` | Show daemon running state, PID, and uptime. |
+| `/daemon start` | `/daemon start` | Start the background daemon process. |
+| `/daemon stop` | `/daemon stop` | Stop the running daemon (sends SIGTERM). |
+| `/daemon restart` | `/daemon restart` | Stop and restart the daemon in one step. |
 | `/clear` | `/clear` | Flushes active session conversational logs, starting fresh while preserving system prompts. |
 | `exit` / `quit` | `exit` | Safely terminates your session, saves logs to `.kognisant/history/`, and exits. |
 
@@ -338,9 +370,212 @@ If you configure a small, local Ollama model that does not understand tool calli
 
 ---
 
-## 11. Daemon & Background Jobs
+## 11. Schema Versioning
+
+The jobs file (`~/.kognisant_core/jobs.json`) uses a versioned format to support safe schema evolution:
+
+```json
+{
+  "schema_version": 1,
+  "jobs": [...]
+}
+```
+
+### How It Works
+
+- Every write to `jobs.json` includes a top-level `schema_version` integer field
+- On load, Kognisant validates the version number before processing
+- If the version is recognized and current, the file is processed normally
+- If the version is recognized but older, automatic forward-migration is applied
+
+### Unrecognized Versions — Hard Failure
+
+If `jobs.json` contains a `schema_version` higher than what your installed Kognisant version understands, the system **refuses to process the file** and raises an error:
+
+```
+Error: Unknown schema version 5. Refusing to process. This file may be from a newer version of Kognisant.
+```
+
+This prevents silent data corruption from incompatible format changes.
+
+### Legacy Format Migration
+
+If Kognisant encounters a bare JSON array (the old pre-versioned format), it automatically wraps it into the versioned structure with `schema_version: 1` using the atomic write path.
+
+### Adding Migrations
+
+Migrations are registered via `MigrationRegistry` in `jobs.py`. Each migration transforms data from version N to N+1:
+
+```python
+@MigrationRegistry.register(from_version=1)
+def migrate_v1_to_v2(data: dict) -> dict:
+    for job in data["jobs"]:
+        job.setdefault("new_field", default_value)
+    data["schema_version"] = 2
+    return data
+```
+
+Each migration step uses the atomic write path, so pre-migration state is preserved in the `.bak` backup file.
+
+---
+
+## 12. Timeouts & Exit Behavior
+
+Kognisant enforces timeout limits to prevent runaway processes:
+
+| Context | Timeout | Description |
+| :--- | :--- | :--- |
+| Scheduled job execution | 3600 seconds (1 hour) | Maximum wall-clock time for a single cron job run |
+| Agent job execution | 1800 seconds (30 min) | Maximum time for a PERP orchestration task |
+| Lock acquisition | 5 seconds | Time to acquire the advisory file lock on `jobs.lock` |
+| Graceful shutdown | 10 seconds per process | After SIGTERM, time before SIGKILL is sent |
+| Follow mode polling | 500 milliseconds | Interval between log file checks in `--follow` mode |
+
+### Persistent Job Exit Behavior
+
+For persistent (long-running) jobs:
+- **`exit(0)` = intentional completion** — the daemon treats this as the script completing successfully and does **not** restart it. The job state becomes "completed".
+- **`exit(non-zero)` = crash** — the daemon auto-restarts the job after a 5-second delay (subject to crash loop detection).
+
+---
+
+## 13. Scheduler Policy
+
+The `scheduler_policy` field controls how the daemon handles missed job executions after a system clock jump (e.g., after suspend/resume or NTP corrections).
+
+### Available Policies
+
+| Policy | Behavior | Default |
+| :--- | :--- | :--- |
+| `skip` | Missed executions during the clock jump period are silently discarded | ✅ Yes |
+| `catchup_once` | Each missed job fires exactly once, regardless of how many intervals were skipped | No |
+
+### How Clock Jumps Are Detected
+
+The daemon uses `time.monotonic()` internally. If the elapsed monotonic time between poll cycles exceeds 30 seconds (2× the 15-second poll interval), a clock jump is declared.
+
+### Setting the Policy
+
+The `scheduler_policy` field is part of the job definition. It defaults to `"skip"` if not specified:
+
+```bash
+# The default behavior — skip missed executions
+kognisant job add --name backup --script backup.py --type scheduled --cron "0 3 * * *"
+
+# To enable catchup behavior, edit the job:
+kognisant job edit backup --scheduler-policy catchup_once
+```
+
+---
+
+## 14. Security & Secrets
+
+### Environment Variable Storage
+
+Environment variables configured for jobs are stored **in plaintext** in `~/.kognisant_core/jobs.json`. The system is **NOT a secrets manager**.
+
+What this means:
+- Any process running under the same user account can read `jobs.json`
+- The file is protected with `chmod 600` (owner read/write only), so other system users cannot access it
+- Do not store highly sensitive credentials directly in job env vars if you share the machine
+
+### Recommended: Use `--env-file` with Restricted Permissions
+
+For sensitive values (API keys, tokens, database passwords), use a separate env file:
+
+```bash
+# Create your secrets file
+echo "API_KEY=sk-abc123" > ~/.secrets/my-bot.env
+chmod 600 ~/.secrets/my-bot.env
+
+# Reference it when creating the job
+kognisant job add --name my-bot --script bot.py --type persistent --env-file ~/.secrets/my-bot.env
+```
+
+The env file format is `KEY=VALUE` per line, with `#` for comments and blank lines ignored.
+
+### File Permission Enforcement
+
+| File | Permissions | Purpose |
+| :--- | :--- | :--- |
+| `jobs.json` | `0o600` | Job queue with env vars |
+| `jobs.json.bak` | `0o600` | Backup snapshot |
+| Env files (recommended) | `0o600` | Secret environment variables |
+
+### Root Privilege Warning
+
+If you start the daemon as root (`euid == 0`), Kognisant displays a warning:
+
+```
+Warning: Daemon running with root privileges. Recommend running under a non-root user.
+```
+
+Running as a non-root user is strongly recommended.
+
+---
+
+## 15. Cron Scheduling
+
+All cron expressions in Kognisant are evaluated in **UTC** (Coordinated Universal Time).
+
+### 5-Field Format
+
+```
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, Sunday=0)
+│ │ │ │ │
+* * * * *
+```
+
+### Supported Syntax
+
+| Symbol | Meaning | Example |
+| :--- | :--- | :--- |
+| `*` | Every value | `* * * * *` (every minute) |
+| `,` | List | `0,30 * * * *` (at :00 and :30) |
+| `-` | Range | `9-17 * * * *` (hours 9 through 17) |
+| `/` | Step | `*/5 * * * *` (every 5 minutes) |
+
+### Examples
+
+```bash
+# Every day at 2:00 AM UTC
+kognisant job add --name backup --script backup.py --type scheduled --cron "0 2 * * *"
+
+# Every Monday at 9:00 AM UTC
+kognisant job add --name weekly-report --script report.py --type scheduled --cron "0 9 * * 1"
+
+# Every 15 minutes
+kognisant job add --name health-check --script check.py --type scheduled --cron "*/15 * * * *"
+```
+
+### Unmatchable Expression Warning
+
+If you create a job with a cron expression that cannot produce a valid next execution within 366 days (e.g., February 31st), Kognisant warns you:
+
+```
+Error: validation - Cron expression '0 0 31 2 *' may never produce a match within 366 days
+Do you want to create this job anyway? [y/N]
+```
+
+### Displayed Timestamps
+
+All displayed timestamps for `next_run_at` and `last_run_at` include a "UTC" suffix:
+
+```
+  nightly-tests   scheduled  scheduled  Run# 5   Exit 0   2025-06-15T02:00 UTC   in 8h 30m (2025-06-16T02:00 UTC)
+```
+
+---
+
+## 16. Daemon & Background Jobs
 
 Kognisant includes a built-in background daemon that can run scripts autonomously — bots, cron jobs, monitoring tasks, and AI agent work — without keeping a terminal open.
+
+> **Note:** The daemon requires a POSIX-compliant system (Linux or macOS). See [Platform Requirements](#platform-requirements).
 
 ### Starting & Stopping the Daemon
 
@@ -353,6 +588,9 @@ kognisant daemon start
 # Check if it's running
 kognisant daemon status
 
+# Restart the daemon (stop + start in one command)
+kognisant daemon restart
+
 # View daemon operational logs
 kognisant daemon logs
 
@@ -362,25 +600,133 @@ kognisant daemon stop
 
 When the daemon stops, it sends SIGTERM to all running job subprocesses, waits up to 10 seconds for each to exit, then sends SIGKILL if needed. The PID file is cleaned up on exit.
 
+### CLI Commands Reference
+
+#### `kognisant daemon restart`
+
+Stops the running daemon (if any) and starts a fresh one. If the daemon is not running, starts it fresh and notifies you:
+
+```bash
+$ kognisant daemon restart
+Daemon restarted with new PID 54321.
+
+# Or if daemon wasn't running:
+$ kognisant daemon restart
+Daemon was not previously running. Started fresh with PID 54321.
+```
+
+#### `kognisant job remove <name>`
+
+Permanently removes a job from the queue. If the job is currently running, its subprocess is terminated first:
+
+```bash
+$ kognisant job remove old-bot
+Job 'old-bot' removed.
+```
+
+#### `kognisant job edit <name> [flags]`
+
+Edit a job's configuration without removing and recreating it:
+
+```bash
+# Change cron schedule
+kognisant job edit nightly-tests --cron "0 3 * * *"
+
+# Update environment variables (merges with existing)
+kognisant job edit my-bot --env API_KEY=new-key --env TIMEOUT=30
+
+# Change the script
+kognisant job edit my-bot --script new-bot.py
+```
+
+Flags:
+- `--cron EXPR` — New cron expression (note: evaluated in UTC)
+- `--env KEY=VALUE` — Set/update environment variable (repeatable)
+- `--script PATH` — New script path (relative to `~/.kognisant_core/scripts/`)
+
+If the job is currently running, you'll see a warning:
+```
+⚠️  Warning: Job 'my-bot' is currently running. Changes will take effect on the next execution cycle.
+```
+
+#### `kognisant job logs <name> --follow`
+
+Continuously display new lines appended to a job's log file, similar to `tail -f`:
+
+```bash
+$ kognisant job logs my-bot --follow
+[2025-06-15T10:30:01] Bot started successfully
+[2025-06-15T10:30:02] Listening for messages...
+^C
+Follow mode stopped.
+```
+
+Checks for new content every 500ms. Press Ctrl+C to stop.
+
+#### `kognisant job add --env-file PATH`
+
+Load environment variables from a file instead of passing them inline:
+
+```bash
+kognisant job add --name my-bot --script bot.py --type persistent --env-file ~/.secrets/bot.env
+```
+
+The env file format:
+```
+# Comments are supported
+API_KEY=sk-abc123
+DB_URL=postgres://localhost/mydb
+```
+
+> **Security note:** Environment variables are stored in plaintext in `jobs.json`. The system is NOT a secrets manager. Use `--env-file` with `chmod 600` files for sensitive values.
+
+### Chat Slash Commands for Jobs
+
+From within `kognisant chat`, you can manage jobs and the daemon without leaving the session:
+
+| Command | Description |
+| :--- | :--- |
+| `/jobs` | List all jobs with name, type, state, run count, exit code, next run, PID |
+| `/job stop <name>` | Send SIGTERM to running subprocess, set state to "cancelled" |
+| `/job logs <name>` | View last 30 lines of job output |
+| `/job restart <name>` | Restart a stopped or crash-looped persistent job |
+| `/job remove <name>` | Permanently remove job from queue (terminates if running) |
+| `/daemon status` | Show daemon PID, uptime, and running state |
+| `/daemon start` | Start the daemon from within chat |
+| `/daemon stop` | Stop the running daemon (sends SIGTERM) |
+| `/daemon restart` | Stop and restart the daemon in one step |
+
 ### Managing Jobs
 
 Jobs are units of work stored in `~/.kognisant_core/jobs.json`. Each job has a name, type, and state.
 
 ```bash
-# Add a scheduled job (runs on a cron schedule)
+# Add a scheduled job (runs on a cron schedule, times in UTC)
 kognisant job add --name nightly-tests --script run-tests.py --type scheduled --cron "0 2 * * *"
 
 # Add a persistent job (runs continuously, auto-restarts on crash)
 kognisant job add --name telegram-bot --script telegram-bot.py --type persistent
 
-# List all jobs with their current state
+# Add a job with environment variables from a file
+kognisant job add --name my-bot --script bot.py --type persistent --env-file ~/.secrets/bot.env
+
+# List all jobs with their current state, run count, exit code, and next run time
 kognisant job list
 
 # Cancel a running job (terminates the subprocess)
 kognisant job cancel my-job
 
+# Permanently remove a job from the queue
+kognisant job remove my-job
+
+# Edit a job's cron schedule
+kognisant job edit my-job --cron "*/30 * * * *"
+
 # View the last 50 lines of a job's output
 kognisant job logs my-job
+
+# Tail a job's log in real-time
+kognisant job logs my-job --follow
 ```
 
 ### Script Management (AI-Created Scripts)
@@ -394,19 +740,6 @@ Scripts follow a contract:
 - **stdout**: Captured to `~/.kognisant_core/logs/{job_name}.log`
 - **stderr**: Captured with `[ERROR]` prefix per line
 - **exit 0**: Success | **exit non-zero**: Failure (triggers restart for persistent jobs)
-
-### Chat Slash Commands for Jobs
-
-From within `kognisant chat`, you can manage jobs without leaving the session:
-
-| Command | Description |
-| :--- | :--- |
-| `/jobs` | List all jobs with name, type, and state |
-| `/job stop <name>` | Cancel a running job |
-| `/job logs <name>` | View last 30 lines of job output |
-| `/job restart <name>` | Restart a stopped or crash-looped persistent job |
-| `/daemon status` | Show daemon PID, uptime, and running state |
-| `/daemon start` | Start the daemon from within chat |
 
 ### Job Types Explained
 

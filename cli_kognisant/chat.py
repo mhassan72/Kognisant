@@ -203,24 +203,37 @@ def process_slash_commands(
                     f"  Control the background daemon process from chat.\n\n"
                     f"  Subcommands:\n"
                     f"    /daemon status      Show if daemon is running, PID, uptime\n"
-                    f"    /daemon start       Start the daemon process\n\n"
+                    f"    /daemon start       Start the daemon process\n"
+                    f"    /daemon stop        Stop the running daemon (SIGTERM)\n"
+                    f"    /daemon restart     Stop + start cycle\n\n"
                     f"  The daemon polls the job queue every 15 seconds and\n"
-                    f"  executes scheduled, persistent, and agent jobs.\n"
+                    f"  executes scheduled, persistent, and agent jobs.\n\n"
+                    f"  Platform:  POSIX-only (Linux, macOS). No Windows support.\n"
+                    f"  Requires:  fcntl.flock() and os.fork()\n"
+                    f"  Cron:      All cron expressions are evaluated in UTC.\n"
+                    f"  Timeouts:  Scheduled 3600s, agent 1800s, shutdown 10s/process.\n"
                 ),
                 "jobs": (
                     f"  {Colors.BOLD}/jobs{Colors.RESET}\n\n"
-                    f"  List all jobs in the queue with their name, type,\n"
-                    f"  and current state (pending, running, completed, etc.).\n"
+                    f"  List all jobs in the queue with their:\n"
+                    f"    • Name, type, and state\n"
+                    f"    • Run count and last exit code\n"
+                    f"    • Last run time (UTC)\n"
+                    f"    • Next run time (for scheduled jobs, UTC)\n"
+                    f"    • PID (if currently running)\n"
                 ),
                 "job": (
                     f"  {Colors.BOLD}/job <subcommand> <name>{Colors.RESET}\n\n"
                     f"  Manage a specific job by name.\n\n"
                     f"  Subcommands:\n"
-                    f"    /job stop <name>      Cancel job and kill subprocess\n"
+                    f"    /job stop <name>      Send SIGTERM to running subprocess, set cancelled\n"
                     f"    /job logs <name>      Show last 30 lines of job log\n"
-                    f"    /job restart <name>   Restart a stopped/crash-looped job\n\n"
+                    f"    /job restart <name>   Restart a stopped/crash-looped job\n"
+                    f"    /job remove <name>    Permanently remove job from queue\n\n"
                     f"  Restart resets state to 'pending' and clears the\n"
-                    f"  restart counter (persistent jobs only).\n"
+                    f"  restart counter (persistent jobs only).\n\n"
+                    f"  Note: If the daemon is not running, restarted jobs\n"
+                    f"  will remain pending until the daemon starts.\n"
                 ),
             }
 
@@ -235,9 +248,11 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Basics{Colors.RESET}        /files  /read <path>  /context  /clear")
         print(f"  {Colors.BOLD}AI Config{Colors.RESET}     /model  /providers")
         print(f"  {Colors.BOLD}Power Tools{Colors.RESET}   /agent <task>  /spec  /tool")
-        print(f"  {Colors.BOLD}Daemon & Jobs{Colors.RESET} /daemon status|start  /jobs  /job stop|logs|restart <name>")
+        print(f"  {Colors.BOLD}Daemon{Colors.RESET}        /daemon status|start|stop|restart")
+        print(f"  {Colors.BOLD}Jobs{Colors.RESET}          /jobs  /job stop|logs|restart|remove <name>")
         print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
         print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
+        print(f"  {Colors.YELLOW}Note:{Colors.RESET} Daemon & jobs require POSIX (Linux/macOS). Cron times are in UTC.")
         print(f"  Type {Colors.CYAN}/help <command>{Colors.RESET} for details (e.g. /help agent)\n")
         return True
 
@@ -794,7 +809,8 @@ def process_slash_commands(
 
     elif cmd == "/jobs":
         # Display all jobs from the Job Queue (R8-AC1)
-        from .jobs import JobQueue
+        from .jobs import JobQueue, CronParser
+        from datetime import datetime, timezone
 
         queue = JobQueue()
         jobs = queue.load()
@@ -803,12 +819,18 @@ def process_slash_commands(
             print(f"  {Colors.YELLOW}No jobs in the queue.{Colors.RESET}\n")
             return True
 
-        print(f"\n  {Colors.BOLD}{'Name':<20} {'Type':<12} {'State':<12}{Colors.RESET}")
-        print(f"  {'─' * 44}")
+        now = datetime.now(timezone.utc)
+
+        print(f"\n  {Colors.BOLD}{'Name':<20} {'Type':<12} {'State':<10} {'Run#':<5} {'Exit':<5} {'Last Run':<22} {'Next Run':<24} {'PID':<8}{Colors.RESET}")
+        print(f"  {'─' * 106}")
         for job in jobs:
             name = job.get("name", "?")
             jtype = job.get("type", "?")
             state = job.get("state", "?")
+            run_count = job.get("run_count", 0)
+            last_exit_code = job.get("last_exit_code")
+            last_run = job.get("last_run_at")
+            pid = job.get("pid")
 
             # Color-code state
             if state == "running":
@@ -820,16 +842,41 @@ def process_slash_commands(
             else:
                 state_display = f"{Colors.YELLOW}{state}{Colors.RESET}"
 
-            print(f"  {name:<20} {jtype:<12} {state_display}")
+            # Format last_run with UTC suffix
+            last_run_display = f"{last_run} UTC" if last_run else "—"
+
+            # Calculate next_run_at for scheduled jobs
+            next_run_display = "—"
+            if job.get("type") == "scheduled" and job.get("cron_expression"):
+                try:
+                    next_dt = CronParser.next_run(job["cron_expression"], now)
+                    delta = next_dt - now
+                    total_mins = int(delta.total_seconds() / 60)
+                    if total_mins >= 60:
+                        hours = total_mins // 60
+                        mins = total_mins % 60
+                        relative = f"in {hours}h {mins}m"
+                    else:
+                        relative = f"in {total_mins}m"
+                    abs_str = next_dt.strftime("%Y-%m-%dT%H:%M") + " UTC"
+                    next_run_display = f"{relative} ({abs_str})"
+                except (ValueError, TypeError):
+                    next_run_display = "—"
+
+            exit_display = str(last_exit_code) if last_exit_code is not None else "—"
+            pid_display = str(pid) if pid and state == "running" else "—"
+
+            print(f"  {name:<20} {jtype:<12} {state_display:<20} {run_count:<5} {exit_display:<5} {last_run_display:<22} {next_run_display:<24} {pid_display:<8}")
         print()
         return True
 
     elif cmd == "/job":
-        # Job management: /job stop|logs|restart <name> (R8-AC2,3,4,7)
-        from .jobs import JobQueue
+        # Job management: /job stop|logs|restart|remove <name>
+        from .jobs import JobQueue, format_error, CANCELLABLE_STATES, TERMINAL_STATES
+        from .daemon import DaemonManager
 
         if len(parts) < 2:
-            print(f"  {Colors.YELLOW}Usage: /job stop|logs|restart <name>{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Usage: /job stop|logs|restart|remove <name>{Colors.RESET}\n")
             return True
 
         subparts = parts[1].split(None, 1)
@@ -844,26 +891,56 @@ def process_slash_commands(
         job = queue.get_job(job_name)
 
         if job is None:
-            # R8-AC7: error for non-existent job
-            print(f"  {Colors.RED}Error: Job '{job_name}' not found.{Colors.RESET}\n")
+            err_msg = format_error('not_found', f"Job '{job_name}' does not exist", "Use '/jobs' to see available jobs.")
+            print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
             return True
 
         if subcmd == "stop":
-            # R8-AC2: cancel job, terminate subprocess if running
+            # Cancel state validation (Requirement 31)
+            current_state = job.get("state", "")
+            if current_state in TERMINAL_STATES:
+                err_msg = format_error('state', f"Job '{job_name}' is in '{current_state}' state and cannot be cancelled")
+                print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
+                return True
+
+            if current_state not in CANCELLABLE_STATES:
+                err_msg = format_error('state', f"Job '{job_name}' is in '{current_state}' state and cannot be cancelled")
+                print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
+                return True
+
+            # R20: send SIGTERM to job subprocess if running
             pid = job.get("pid")
-            if pid:
+            if pid and current_state == "running":
                 import signal as sig
                 try:
                     os.kill(pid, sig.SIGTERM)
                 except (ProcessLookupError, PermissionError):
                     pass
 
-            queue.update_status(job_name, "cancelled")
-            print(f"  {Colors.GREEN}Job '{job_name}' stopped.{Colors.RESET}\n")
+            queue.update_status(job_name, "cancelled", pid=None)
+            print(f"  {Colors.GREEN}Job '{job_name}' stopped (state → cancelled).{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "remove":
+            # R21: if running, terminate first; then remove from queue
+            pid = job.get("pid")
+            if pid and job.get("state") == "running":
+                import signal as sig
+                try:
+                    os.kill(pid, sig.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            success = queue.remove_job(job_name)
+            if success:
+                print(f"  {Colors.GREEN}Job '{job_name}' removed from queue.{Colors.RESET}\n")
+            else:
+                err_msg = format_error("io", f"Failed to remove job '{job_name}'")
+                print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
             return True
 
         elif subcmd == "logs":
-            # R8-AC3: display last 30 lines of job log
+            # Display last 30 lines of job log
             log_output = queue.read_job_logs(job_name, lines=30)
             print(f"\n  {Colors.BOLD}--- Logs: {job_name} (last 30 lines) ---{Colors.RESET}")
             print(log_output)
@@ -871,7 +948,7 @@ def process_slash_commands(
             return True
 
         elif subcmd == "restart":
-            # R8-AC4: restart stopped/crash_looped persistent job
+            # R18: warn if daemon not running
             if job.get("type") != "persistent":
                 print(f"  {Colors.YELLOW}Only persistent jobs can be restarted.{Colors.RESET}\n")
                 return True
@@ -884,25 +961,31 @@ def process_slash_commands(
                 restart_count=0,
                 restart_timestamps=[],
             )
-            print(f"  {Colors.GREEN}Job '{job_name}' restarted (state reset to pending).{Colors.RESET}\n")
+            print(f"  {Colors.GREEN}Job '{job_name}' restarted (state reset to pending).{Colors.RESET}")
+
+            # Warn if daemon not running (Requirement 18)
+            if not DaemonManager.is_running():
+                print(f"  {Colors.YELLOW}⚠️  Warning: daemon is not running, job will remain pending until you run `kognisant daemon start`{Colors.RESET}")
+            print()
             return True
 
         else:
-            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /job stop|logs|restart <name>{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /job stop|logs|restart|remove <name>{Colors.RESET}\n")
             return True
 
     elif cmd == "/daemon":
-        # Daemon control: /daemon status|start (R8-AC5,6)
+        # Daemon control: /daemon status|start|stop|restart
         from .daemon import DaemonManager
+        from .jobs import format_error
 
         if len(parts) < 2:
-            print(f"  {Colors.YELLOW}Usage: /daemon status|start{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Usage: /daemon status|start|stop|restart{Colors.RESET}\n")
             return True
 
         subcmd = parts[1].strip().lower()
 
         if subcmd == "status":
-            # R8-AC5: display daemon status, PID, uptime
+            # Display daemon status, PID, uptime
             status_info = DaemonManager.status()
             if status_info["running"]:
                 print(f"\n  {Colors.BOLD}Daemon Status:{Colors.RESET}")
@@ -916,7 +999,7 @@ def process_slash_commands(
             return True
 
         elif subcmd == "start":
-            # R8-AC6: start daemon and display confirmation
+            # Start daemon and display confirmation
             try:
                 pid = DaemonManager.start()
                 print(f"  {Colors.GREEN}Daemon started with PID {pid}.{Colors.RESET}\n")
@@ -924,8 +1007,36 @@ def process_slash_commands(
                 print(f"  {Colors.RED}Error: {e}{Colors.RESET}\n")
             return True
 
+        elif subcmd == "stop":
+            # R19: send SIGTERM to daemon, display confirmation
+            if not DaemonManager.is_running():
+                err_msg = format_error("state", "No daemon is currently running")
+                print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
+                return True
+
+            success = DaemonManager.stop()
+            if success:
+                print(f"  {Colors.GREEN}Daemon stopped.{Colors.RESET}\n")
+            else:
+                err_msg = format_error("io", "Failed to stop daemon")
+                print(f"  {Colors.RED}{err_msg}{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "restart":
+            # R22: stop + start cycle
+            was_running = DaemonManager.is_running()
+            try:
+                new_pid = DaemonManager.restart()
+                if was_running:
+                    print(f"  {Colors.GREEN}Daemon restarted with new PID {new_pid}.{Colors.RESET}\n")
+                else:
+                    print(f"  {Colors.GREEN}Daemon was not previously running. Started fresh with PID {new_pid}.{Colors.RESET}\n")
+            except RuntimeError as e:
+                print(f"  {Colors.RED}Error: {e}{Colors.RESET}\n")
+            return True
+
         else:
-            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /daemon status|start{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /daemon status|start|stop|restart{Colors.RESET}\n")
             return True
 
     return False
@@ -1132,8 +1243,8 @@ def run_api_chat(model_config, project_info=None):
 
                         try:
                             result = execute_tool(func_name, func_args, project_info)
-                            is_err = isinstance(result, str) and result.startswith(
-                                "[Error]"
+                            is_err = isinstance(result, str) and (
+                                result.startswith("[Error]") or result.startswith("Error: [")
                             )
                         except Exception as ex:
                             result = f"[Error] {ex}"
@@ -1142,6 +1253,9 @@ def run_api_chat(model_config, project_info=None):
                         if is_err:
                             any_failed = True
                             err_msg = result.replace("[Error]", "").strip()
+                            if err_msg.startswith("["):
+                                # New format: "Error: [category] - description"
+                                err_msg = result
                             if len(err_msg) > 60:
                                 err_msg = err_msg[:57] + "..."
                             sys.stdout.write(

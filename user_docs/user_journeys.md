@@ -226,21 +226,29 @@ Output:
 | In Chat | `/spec <name> run` | Execute next spec task |
 | In Chat | `/context` | View project memory |
 | In Chat | `/clear` | Reset conversation |
-| In Chat | `/jobs` | List all background jobs |
-| In Chat | `/job stop <name>` | Cancel a running job |
+| In Chat | `/jobs` | List all background jobs (name, type, state, run#, exit code, next run) |
+| In Chat | `/job stop <name>` | Send SIGTERM, set state to cancelled |
 | In Chat | `/job logs <name>` | View job output logs |
 | In Chat | `/job restart <name>` | Restart a stopped/crashed job |
+| In Chat | `/job remove <name>` | Permanently remove job from queue |
 | In Chat | `/daemon status` | Check daemon health |
 | In Chat | `/daemon start` | Start the background daemon |
+| In Chat | `/daemon stop` | Stop the running daemon |
+| In Chat | `/daemon restart` | Restart the daemon (stop + start) |
 | In Chat | `exit` | End session |
 | Terminal | `kognisant daemon start` | Start background daemon |
 | Terminal | `kognisant daemon stop` | Stop the daemon gracefully |
+| Terminal | `kognisant daemon restart` | Stop and restart the daemon |
 | Terminal | `kognisant daemon status` | Check daemon status |
 | Terminal | `kognisant daemon logs` | View daemon log |
 | Terminal | `kognisant job add` | Add a new job to the queue |
-| Terminal | `kognisant job list` | List all jobs |
+| Terminal | `kognisant job add --env-file` | Add job with env vars from file |
+| Terminal | `kognisant job list` | List all jobs with details |
 | Terminal | `kognisant job cancel <name>` | Cancel a job |
+| Terminal | `kognisant job remove <name>` | Remove a job permanently |
+| Terminal | `kognisant job edit <name>` | Edit job config (--cron, --env, --script) |
 | Terminal | `kognisant job logs <name>` | View job logs |
+| Terminal | `kognisant job logs <name> -f` | Tail job logs in real-time |
 
 ---
 
@@ -298,6 +306,208 @@ Output:
     Jobs:
       nightly-tests  scheduled  scheduled  last_run: 2025-06-15T02:00:05
     ```
+
+---
+
+## Scenario 11: Editing a Running Job
+**Goal**: You need to change the schedule of a running cron job without recreating it.
+
+1.  **Check current jobs**:
+    ```bash
+    kognisant job list
+    ```
+    Output:
+    ```
+      nightly-tests   scheduled  scheduled  Run# 12  Exit 0  2025-06-15T02:00 UTC   in 8h (2025-06-16T02:00 UTC)
+    ```
+2.  **Edit the cron schedule** to run at 3 AM instead:
+    ```bash
+    kognisant job edit nightly-tests --cron "0 3 * * *"
+    ```
+    Output:
+    ```
+    Job 'nightly-tests' updated: cron_expression='0 3 * * *'
+    ```
+3.  **If the job were currently running**, you'd see:
+    ```
+    ⚠️  Warning: Job 'nightly-tests' is currently running. Changes will take effect on the next execution cycle.
+    ```
+4.  **Verify the change**:
+    ```bash
+    kognisant job list
+    ```
+    Now shows `in 9h (2025-06-16T03:00 UTC)` for next run.
+
+---
+
+## Scenario 12: Removing a Job
+**Goal**: You no longer need a background bot and want to clean it up.
+
+1.  **Check if the job is running**:
+    ```bash
+    kognisant job list
+    ```
+    Shows `telegram-bot  persistent  running  (PID 48291)`
+2.  **Remove it** (terminates the process automatically):
+    ```bash
+    kognisant job remove telegram-bot
+    ```
+    Output:
+    ```
+    Job 'telegram-bot' removed.
+    ```
+3.  **Or from chat**:
+    ```
+    /job remove telegram-bot
+    ```
+    Output:
+    ```
+    Job 'telegram-bot' removed from queue.
+    ```
+4.  **Confirm it's gone**:
+    ```
+    /jobs
+    ```
+    The job no longer appears in the listing.
+
+---
+
+## Scenario 13: Restarting the Daemon
+**Goal**: The daemon seems sluggish or you updated configuration and want a clean restart.
+
+1.  **From CLI** (single command):
+    ```bash
+    kognisant daemon restart
+    ```
+    Output:
+    ```
+    Daemon restarted with new PID 55123.
+    ```
+2.  **From chat**:
+    ```
+    /daemon restart
+    ```
+    Output:
+    ```
+    Daemon restarted with new PID 55123.
+    ```
+3.  **If daemon wasn't running**, both methods start it fresh:
+    ```
+    Daemon was not previously running. Started fresh with PID 55123.
+    ```
+
+---
+
+## Scenario 14: Tailing Live Logs
+**Goal**: You want to watch a bot's output in real-time as it processes requests.
+
+1.  **Start following the log**:
+    ```bash
+    kognisant job logs telegram-bot --follow
+    ```
+2.  **You see recent output** and then live updates as they arrive:
+    ```
+    [2025-06-15T14:30:01] Bot started successfully
+    [2025-06-15T14:30:02] Listening for messages...
+    [2025-06-15T14:31:15] Received message from user_42
+    [2025-06-15T14:31:15] Processing FAQ query...
+    [2025-06-15T14:31:16] Reply sent: "Here's how to reset your password..."
+    ```
+3.  **Press Ctrl+C** to stop following:
+    ```
+    Follow mode stopped.
+    ```
+
+The log is polled every 500ms for new content.
+
+---
+
+## Scenario 15: Recovering from Corruption
+**Goal**: Something went wrong and `jobs.json` got corrupted or deleted.
+
+### If jobs.json is deleted while daemon is running:
+
+1.  The daemon detects the missing file on its next poll cycle
+2.  If `jobs.json.bak` exists, it automatically restores from the backup
+3.  You see a warning in daemon.log:
+    ```
+    WARNING: Primary missing, restored from backup
+    ```
+4.  All your jobs continue running as if nothing happened
+
+### If jobs.json contains invalid JSON:
+
+1.  The daemon (or any CLI command) detects the corruption on load
+2.  If `jobs.json.bak` is valid, it restores from the backup automatically
+3.  The corrupted file is replaced with the last known good state
+4.  A warning is logged indicating recovery was performed
+
+### If both files are gone:
+
+1.  The system initializes a fresh empty job queue: `{"schema_version": 1, "jobs": []}`
+2.  An error is logged: "Both primary and backup missing/corrupted. Data loss."
+3.  You'll need to recreate your jobs
+
+### Prevention:
+
+- Every successful write to `jobs.json` also creates `jobs.json.bak`
+- Both files are written atomically (temp → fsync → rename) to prevent partial writes
+- The system never modifies `jobs.json` in-place
+
+---
+
+## Scenario 16: Handling Clock Jumps
+**Goal**: Your laptop was suspended overnight, and you want to understand what happens to missed cron jobs.
+
+1.  **With the default `skip` policy** (most jobs):
+    - Laptop suspends at 11 PM, wakes at 7 AM
+    - Your 2 AM cron job that was missed is simply skipped
+    - The daemon logs: `"Clock jump detected. Skipping missed executions for: nightly-tests"`
+    - The next scheduled run happens at 2 AM the following night
+
+2.  **With `catchup_once` policy** (critical jobs):
+    ```bash
+    kognisant job edit critical-sync --scheduler-policy catchup_once
+    ```
+    - Laptop suspends at 11 PM, wakes at 7 AM
+    - The daemon detects the clock jump
+    - Your `critical-sync` job fires exactly once (even though it missed multiple intervals)
+    - The daemon logs: `"Clock jump detected. Catchup execution for: critical-sync"`
+
+3.  **The 30-second threshold**: A clock jump is detected when the elapsed time between daemon poll cycles exceeds 30 seconds (2× the 15-second polling interval).
+
+---
+
+## Scenario 17: Using --env-file for Secrets
+**Goal**: You want to run a bot with API keys without storing them directly in the job queue.
+
+1.  **Create a secrets file**:
+    ```bash
+    mkdir -p ~/.secrets
+    cat > ~/.secrets/my-bot.env << 'EOF'
+    # Bot credentials
+    TELEGRAM_TOKEN=123456:ABC-DEF
+    DATABASE_URL=postgres://user:pass@localhost/db
+    API_SECRET=sk-very-secret-key
+    EOF
+    chmod 600 ~/.secrets/my-bot.env
+    ```
+
+2.  **Create the job using the env file**:
+    ```bash
+    kognisant job add --name my-bot --script telegram-bot.py --type persistent --env-file ~/.secrets/my-bot.env
+    ```
+
+3.  **What happens internally**:
+    - Kognisant reads the KEY=VALUE pairs from your file
+    - The values are stored in `jobs.json` (which has `chmod 600`)
+    - The daemon passes them as environment variables to the subprocess
+
+4.  **Security considerations**:
+    - `jobs.json` is protected with `0o600` permissions (owner-only)
+    - But any process running as your user can still read it
+    - For maximum security, consider using a dedicated service account
+    - The system is NOT a secrets manager — for high-security environments, use a proper vault
 
 ---
 

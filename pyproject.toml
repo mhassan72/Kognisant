@@ -7,7 +7,7 @@ name = "cli-kognisant"
 version = "0.1.0"
 description = "A powerful and clean Python CLI tool"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "MA Hassan", email = "msugroo@gmail.com"}

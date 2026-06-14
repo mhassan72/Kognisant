@@ -433,11 +433,15 @@ class TestConcurrentCLIDaemonAccess(unittest.TestCase):
         with open(os.path.join(self.test_dir, "jobs.json"), "r") as f:
             data = json.load(f)
 
-        self.assertIsInstance(data, list)
-        self.assertEqual(len(data), 20)
+        self.assertIsInstance(data, dict)
+        self.assertIn("schema_version", data)
+        self.assertEqual(data["schema_version"], 1)
+        jobs = data["jobs"]
+        self.assertIsInstance(jobs, list)
+        self.assertEqual(len(jobs), 20)
 
         # Verify all job names are present
-        names = {j["name"] for j in data}
+        names = {j["name"] for j in jobs}
         for i in range(10):
             self.assertIn(f"cli-job-{i}", names)
             self.assertIn(f"daemon-job-{i}", names)

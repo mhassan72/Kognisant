@@ -9,11 +9,85 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
+
+# Schema versioning constant
+CURRENT_SCHEMA_VERSION = 1
+
+# Valid error categories for standardized error format
+VALID_ERROR_CATEGORIES = {"validation", "not_found", "state", "permission", "timeout", "io"}
+
+
+def format_error(category: str, description: str, suggestion: str | None = None) -> str:
+    """Format a standardized error message.
+
+    Args:
+        category: One of: validation, not_found, state, permission, timeout, io
+        description: Human-readable error description.
+        suggestion: Optional recovery action.
+
+    Returns:
+        "Error: [category] - [description]. [suggestion]" or
+        "Error: [category] - [description]." if no suggestion.
+    """
+    if suggestion:
+        return f"Error: [{category}] - {description}. {suggestion}"
+    return f"Error: [{category}] - {description}."
+
+
+class MigrationRegistry:
+    """Registry of forward-migration functions keyed by source version.
+
+    Each migration transforms data from version N to N+1.
+    Migrations use the same _atomic_save path to ensure:
+    - Pre-migration state is preserved in .bak
+    - Migration result is crash-safe
+    """
+
+    _migrations: dict[int, Callable[[dict], dict]] = {}
+
+    @classmethod
+    def register(cls, from_version: int):
+        """Decorator to register a migration function from from_version to from_version+1."""
+        def decorator(fn: Callable[[dict], dict]) -> Callable[[dict], dict]:
+            cls._migrations[from_version] = fn
+            return fn
+        return decorator
+
+    @classmethod
+    def apply_pending(cls, data: dict, save_fn: Callable[[dict], None]) -> dict:
+        """Apply all pending migrations from data's schema_version to CURRENT_SCHEMA_VERSION.
+
+        Each step:
+        1. Call migration function
+        2. save_fn(result) — uses atomic_save path, creating .bak of prior version
+
+        Args:
+            data: Current file data with schema_version.
+            save_fn: Atomic save function for durability.
+
+        Returns:
+            Fully migrated data structure.
+
+        Raises:
+            ValueError: If a required migration is missing from registry.
+        """
+        current = data.get("schema_version", 1)
+        while current < CURRENT_SCHEMA_VERSION:
+            if current not in cls._migrations:
+                raise ValueError(
+                    f"No migration registered for version {current} → {current + 1}"
+                )
+            data = cls._migrations[current](data)
+            save_fn(data)
+            current = data["schema_version"]
+        return data
 
 
 class FileLock:
@@ -316,6 +390,34 @@ class CronParser:
             f"No matching time found for '{expression}' within 4 years after {after}"
         )
 
+    @staticmethod
+    def can_match_within_days(expression: str, days: int = 366) -> bool:
+        """Return True if expression produces at least one match within N days.
+
+        Tries to find a next_run within the given number of days from now.
+        Returns False if no match found (expression may never fire).
+
+        Args:
+            expression: A 5-field cron expression string.
+            days: Number of days to search forward (default 366).
+
+        Returns:
+            True if at least one match exists within the window.
+        """
+        if not CronParser.validate(expression):
+            return False
+
+        now = datetime.now(timezone.utc)
+        candidate = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        max_date = now + timedelta(days=days)
+
+        while candidate <= max_date:
+            if CronParser.matches(expression, candidate):
+                return True
+            candidate += timedelta(minutes=1)
+
+        return False
+
 
 # Valid job name pattern: 1-64 chars, lowercase alphanumeric, hyphens, underscores
 JOB_NAME_PATTERN = re.compile(r"^[a-z0-9_-]{1,64}$")
@@ -327,12 +429,17 @@ VALID_JOB_STATES = {
     "failed", "cancelled", "crash_loop",
 }
 
+# Cancel state machine
+CANCELLABLE_STATES = {"pending", "scheduled", "running"}
+TERMINAL_STATES = {"completed", "failed", "cancelled", "crash_loop"}
+
 
 class JobQueue:
     """Manages the job queue stored in ~/.kognisant_core/jobs.json.
 
     Provides CRUD operations on jobs with advisory file locking for
-    concurrent access safety. Writes are atomic via temp file + rename.
+    concurrent access safety. Writes are atomic via temp file + fsync + rename.
+    Storage format: {"schema_version": 1, "jobs": [...]}
 
     Per R2-AC1,3,4 | R7-AC1,6,8,10 | R11-AC1,2,3,4,5.
     """
@@ -348,70 +455,219 @@ class JobQueue:
             base_dir = os.path.expanduser("~/.kognisant_core")
         self.base_dir = base_dir
         self.queue_path = os.path.join(base_dir, "jobs.json")
+        self.backup_path = os.path.join(base_dir, "jobs.json.bak")
         self.lock_path = os.path.join(base_dir, "jobs.lock")
         self.logs_dir = os.path.join(base_dir, "logs")
+
+    @property
+    def BACKUP_PATH(self) -> str:
+        """Path to the backup file."""
+        return self.backup_path
+
+    def _atomic_save(self, data: dict) -> None:
+        """Atomic write with fsync and backup.
+
+        Sequence: tempfile.mkstemp → json.dump → flush() → os.fsync(fd)
+        → os.chmod(tmp, 0o600) → os.rename(tmp, QUEUE_PATH) → os.fsync(dirfd)
+        → shutil.copy2(QUEUE_PATH, BACKUP_PATH) → os.chmod(BACKUP_PATH, 0o600)
+        → os.fsync(bak_fd).
+
+        On rename failure: os.unlink(tmp), leave existing unchanged.
+        Sets file permissions to 0o600 on both primary and backup.
+        """
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.base_dir, suffix=".tmp", prefix="jobs_"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.chmod(tmp_path, 0o600)
+
+            # Atomic rename
+            os.rename(tmp_path, self.queue_path)
+        except OSError:
+            # On rename failure: remove temp, leave existing unchanged
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        # fsync directory to make rename durable
+        try:
+            dirfd = os.open(self.base_dir, os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        except OSError:
+            pass
+
+        # Create backup
+        try:
+            shutil.copy2(self.queue_path, self.backup_path)
+            os.chmod(self.backup_path, 0o600)
+            bak_fd = os.open(self.backup_path, os.O_RDONLY)
+            try:
+                os.fsync(bak_fd)
+            finally:
+                os.close(bak_fd)
+        except OSError:
+            pass
+
+    def _load_raw(self) -> dict:
+        """Load raw JSON from queue file with recovery fallback.
+
+        Decision tree:
+        1. Primary exists + valid JSON + recognized schema_version → return data
+        2. Primary exists + valid JSON + unrecognized schema_version → raise ValueError
+        3. Primary exists + invalid JSON → try .bak, log warning
+        4. Primary missing + .bak exists → restore from .bak, log warning
+        5. Both missing/corrupted → return {"schema_version": 1, "jobs": []}
+        6. Primary exists + bare array (legacy) → migrate to versioned format
+        """
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        if os.path.exists(self.queue_path):
+            try:
+                with open(self.queue_path, "r") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                # Primary corrupted → try .bak
+                logger.warning(
+                    "Primary jobs.json corrupted, attempting backup recovery"
+                )
+                return self._recover_from_backup()
+
+            # Valid JSON — check structure
+            if isinstance(data, list):
+                # Legacy bare array format → wrap and migrate
+                wrapped = {"schema_version": CURRENT_SCHEMA_VERSION, "jobs": data}
+                self._atomic_save(wrapped)
+                logger.info("Migrated legacy bare-array format to versioned schema")
+                return wrapped
+
+            if isinstance(data, dict):
+                if "schema_version" in data:
+                    version = data["schema_version"]
+                    if isinstance(version, int) and version <= CURRENT_SCHEMA_VERSION:
+                        return data
+                    else:
+                        raise ValueError(
+                            f"Unknown schema version {version}. "
+                            f"Refusing to process. This file may be from "
+                            f"a newer version of Kognisant."
+                        )
+                else:
+                    # Dict without schema_version → treat as corrupted
+                    logger.warning(
+                        "jobs.json is a dict without schema_version, "
+                        "attempting backup recovery"
+                    )
+                    return self._recover_from_backup()
+
+            # Not a dict or list → treat as corrupted
+            logger.warning(
+                "jobs.json contains unexpected type, attempting backup recovery"
+            )
+            return self._recover_from_backup()
+        else:
+            # Primary missing
+            if os.path.exists(self.backup_path):
+                logger.warning(
+                    "Primary jobs.json missing, restoring from backup"
+                )
+                return self._recover_from_backup()
+            else:
+                # Both missing → init empty
+                empty = {"schema_version": CURRENT_SCHEMA_VERSION, "jobs": []}
+                self._atomic_save(empty)
+                return empty
+
+    def _recover_from_backup(self) -> dict:
+        """Attempt recovery from .bak file. Returns data or empty schema."""
+        if os.path.exists(self.backup_path):
+            try:
+                with open(self.backup_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "schema_version" in data:
+                    version = data["schema_version"]
+                    if isinstance(version, int) and version <= CURRENT_SCHEMA_VERSION:
+                        logger.warning(
+                            "Recovered from backup file jobs.json.bak"
+                        )
+                        self._atomic_save(data)
+                        return data
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Both missing or corrupted
+        logger.error(
+            "Both primary and backup missing/corrupted. Data loss. "
+            "Initializing empty job queue."
+        )
+        empty = {"schema_version": CURRENT_SCHEMA_VERSION, "jobs": []}
+        self._atomic_save(empty)
+        return empty
+
+    def _migrate_if_needed(self, data: dict) -> dict:
+        """Apply pending migrations via MigrationRegistry.apply_pending().
+
+        Args:
+            data: Current versioned data structure.
+
+        Returns:
+            Fully migrated data structure.
+        """
+        return MigrationRegistry.apply_pending(data, self._atomic_save)
+
+    def _locked_modify(self, fn: Callable[[list[dict]], list[dict]]) -> None:
+        """Hold Advisory_Lock across: load → fn(jobs) → atomic_save.
+
+        The lock is held for the entire read-modify-write cycle.
+        Raises TimeoutError if lock not acquired within 5 seconds.
+        """
+        with FileLock(self.lock_path):
+            data = self._load_raw()
+            data = self._migrate_if_needed(data)
+            jobs = data.get("jobs", [])
+            jobs = fn(jobs)
+            data["jobs"] = jobs
+            self._atomic_save(data)
 
     def load(self) -> list[dict]:
         """Load jobs from the queue file with advisory lock.
 
         Returns an empty list if the file does not exist or contains
         malformed JSON (logs error in the latter case).
-
-        Per R2-AC3 (missing file), R2-AC4 (malformed JSON).
         """
         os.makedirs(self.base_dir, exist_ok=True)
 
-        if not os.path.exists(self.queue_path):
-            return []
-
         try:
             with FileLock(self.lock_path):
-                with open(self.queue_path, "r") as f:
-                    data = json.load(f)
-                if not isinstance(data, list):
-                    logger.error(
-                        "Job queue file %s does not contain a JSON array",
-                        self.queue_path,
-                    )
-                    return []
-                return data
-        except json.JSONDecodeError as e:
-            logger.error(
-                "Malformed JSON in job queue file %s: %s",
-                self.queue_path, e,
-            )
-            return []
-        except TimeoutError:
-            logger.error(
-                "Could not acquire lock to read job queue at %s",
-                self.queue_path,
-            )
+                data = self._load_raw()
+                data = self._migrate_if_needed(data)
+                return data.get("jobs", [])
+        except (ValueError, TimeoutError) as e:
+            logger.error("Failed to load job queue: %s", e)
             return []
 
     def save(self, jobs: list[dict]) -> None:
-        """Atomically save jobs to the queue file.
+        """Atomically save jobs to the queue file in versioned format.
 
-        Writes to a temporary file first, then renames to the target path
-        to prevent partial writes. Lock is acquired before writing.
-
-        Per R11-AC3 (atomic write via temp+rename).
+        Wraps the jobs list into the versioned schema and saves atomically.
+        Lock is acquired before writing.
         """
         os.makedirs(self.base_dir, exist_ok=True)
 
         with FileLock(self.lock_path):
-            # Write to temp file in the same directory (same filesystem for rename)
-            fd, tmp_path = tempfile.mkstemp(
-                dir=self.base_dir, suffix=".tmp", prefix="jobs_"
-            )
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(jobs, f, indent=2)
-                os.rename(tmp_path, self.queue_path)
-            except Exception:
-                # Clean up temp file on failure
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                raise
+            data = {"schema_version": CURRENT_SCHEMA_VERSION, "jobs": jobs}
+            self._atomic_save(data)
 
     def add_job(self, job_config: dict) -> str:
         """Add a new job to the queue.
@@ -421,15 +677,14 @@ class JobQueue:
 
         Args:
             job_config: Dict with at minimum "name" and "type" keys.
-                        Optional: script_path, task, cron_expression, env_vars.
+                        Optional: script_path, task, cron_expression, env_vars,
+                        project_root.
 
         Returns:
             Success message string.
 
         Raises:
             ValueError: If name is invalid, type is invalid, or name already exists.
-
-        Per R7-AC10 (name validation), R7-AC6 (duplicate detection).
         """
         name = job_config.get("name", "")
         if not JOB_NAME_PATTERN.match(name):
@@ -445,16 +700,7 @@ class JobQueue:
                 f"{sorted(VALID_JOB_TYPES)}"
             )
 
-        jobs = self.load()
-
-        # Check for duplicates
-        for existing in jobs:
-            if existing.get("name") == name:
-                raise ValueError(
-                    f"A job with name '{name}' already exists"
-                )
-
-        # Build the full job entry per R11-AC5
+        # Build the full job entry
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         job_entry = {
             "name": name,
@@ -462,18 +708,36 @@ class JobQueue:
             "state": "pending",
             "script_path": job_config.get("script_path", ""),
             "task": job_config.get("task", None),
+            "project_root": job_config.get("project_root", None),
             "cron_expression": job_config.get("cron_expression", None),
             "env_vars": job_config.get("env_vars", {}),
+            "scheduler_policy": job_config.get("scheduler_policy", "skip"),
             "created_at": now_utc,
             "last_run_at": None,
+            "last_exit_code": None,
+            "run_count": 0,
             "pid": None,
+            "pid_started_at": None,
             "restart_count": 0,
             "restart_timestamps": [],
         }
 
-        jobs.append(job_entry)
-        self.save(jobs)
-        return f"Job '{name}' added successfully"
+        result_msg = ""
+
+        def _add(jobs: list[dict]) -> list[dict]:
+            nonlocal result_msg
+            # Check for duplicates
+            for existing in jobs:
+                if existing.get("name") == name:
+                    raise ValueError(
+                        f"A job with name '{name}' already exists"
+                    )
+            jobs.append(job_entry)
+            result_msg = f"Job '{name}' added successfully"
+            return jobs
+
+        self._locked_modify(_add)
+        return result_msg
 
     def remove_job(self, name: str) -> bool:
         """Remove a job from the queue by name.
@@ -484,15 +748,16 @@ class JobQueue:
         Returns:
             True if the job was found and removed, False otherwise.
         """
-        jobs = self.load()
-        original_count = len(jobs)
-        jobs = [j for j in jobs if j.get("name") != name]
+        removed = [False]
 
-        if len(jobs) == original_count:
-            return False
+        def _remove(jobs: list[dict]) -> list[dict]:
+            original_count = len(jobs)
+            new_jobs = [j for j in jobs if j.get("name") != name]
+            removed[0] = len(new_jobs) < original_count
+            return new_jobs
 
-        self.save(jobs)
-        return True
+        self._locked_modify(_remove)
+        return removed[0]
 
     def update_status(self, name: str, state: str, **kwargs) -> bool:
         """Update a job's state and additional fields.
@@ -506,17 +771,56 @@ class JobQueue:
         Returns:
             True if the job was found and updated, False otherwise.
         """
-        jobs = self.load()
+        found = [False]
 
-        for job in jobs:
-            if job.get("name") == name:
-                job["state"] = state
-                for key, value in kwargs.items():
-                    job[key] = value
-                self.save(jobs)
-                return True
+        def _update(jobs: list[dict]) -> list[dict]:
+            for job in jobs:
+                if job.get("name") == name:
+                    job["state"] = state
+                    for key, value in kwargs.items():
+                        job[key] = value
+                    found[0] = True
+                    break
+            return jobs
 
-        return False
+        self._locked_modify(_update)
+        return found[0]
+
+    def cancel_job(self, name: str) -> str:
+        """Cancel a job with state validation.
+
+        Verifies the job is in a cancellable state (pending, scheduled, running)
+        before allowing the cancel. Terminal states cannot be cancelled.
+
+        Args:
+            name: The job name to cancel.
+
+        Returns:
+            Success message or error message (using format_error).
+        """
+        job = self.get_job(name)
+        if job is None:
+            return format_error(
+                "not_found",
+                f"Job '{name}' does not exist",
+                "Use 'kognisant job list' to see available jobs."
+            )
+
+        current_state = job.get("state", "")
+        if current_state in TERMINAL_STATES:
+            return format_error(
+                "state",
+                f"Job '{name}' is in '{current_state}' state and cannot be cancelled"
+            )
+
+        if current_state not in CANCELLABLE_STATES:
+            return format_error(
+                "state",
+                f"Job '{name}' is in '{current_state}' state and cannot be cancelled"
+            )
+
+        self.update_status(name, "cancelled", pid=None)
+        return f"Job '{name}' cancelled successfully"
 
     def get_job(self, name: str) -> dict | None:
         """Get a single job by name.
@@ -549,8 +853,6 @@ class JobQueue:
 
         Returns:
             List of job dicts that are due for execution.
-
-        Per R2-AC5: daemon executes scheduled jobs matching current time.
         """
         jobs = self.load()
         due = []
@@ -573,22 +875,12 @@ class JobQueue:
         return due
 
     def get_persistent_jobs(self) -> list[dict]:
-        """Return all persistent type jobs.
-
-        Per R2-AC6: daemon manages persistent jobs.
-        """
+        """Return all persistent type jobs."""
         jobs = self.load()
         return [j for j in jobs if j.get("type") == "persistent"]
 
     def get_job_log_path(self, name: str) -> str:
-        """Return the path to a job's log file.
-
-        Args:
-            name: The job name.
-
-        Returns:
-            Absolute path to ~/.kognisant_core/logs/{job_name}.log
-        """
+        """Return the path to a job's log file."""
         return os.path.join(self.logs_dir, f"{name}.log")
 
     def read_job_logs(self, name: str, lines: int = 50) -> str:
@@ -601,8 +893,6 @@ class JobQueue:
         Returns:
             String with the last N lines, or an error message if
             the log file doesn't exist.
-
-        Per R7-AC11: error if log file doesn't exist.
         """
         log_path = self.get_job_log_path(name)
 

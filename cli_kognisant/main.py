@@ -9,7 +9,7 @@ from .config import (
     init_project,
 )
 from .daemon import DaemonManager
-from .jobs import CronParser, JobQueue, JOB_NAME_PATTERN
+from .jobs import CronParser, JobQueue, JOB_NAME_PATTERN, format_error, CANCELLABLE_STATES, TERMINAL_STATES
 
 
 def _handle_setup():
@@ -128,6 +128,46 @@ def _handle_status():
                 progress = f"({done}/{total})" if total > 0 else ""
                 print(f"    {icon} {s['name']}  {status} {progress}")
 
+    # Daemon status section (Requirement 17)
+    print(f"\n  {Colors.BOLD}Daemon:{Colors.RESET}")
+    daemon_status = DaemonManager.status()
+    if daemon_status["running"]:
+        uptime_str = daemon_status.get("uptime") or "unknown"
+        print(f"    State:        {Colors.GREEN}running{Colors.RESET}")
+        print(f"    PID:          {daemon_status['pid']}")
+        print(f"    Uptime:       {uptime_str}")
+        # Count active (running) jobs
+        active_jobs = sum(1 for j in JobQueue().load() if j.get("state") == "running")
+        print(f"    Active Jobs:  {active_jobs}")
+        # Show last poll time from daemon.log if available
+        from .daemon import LOG_FILE
+        if os.path.exists(LOG_FILE):
+            try:
+                with open(LOG_FILE, "r") as f:
+                    lines = f.readlines()
+                # Find last timestamp in log
+                last_poll = None
+                for line in reversed(lines[-50:]):
+                    if line and line[0:2] == "20":
+                        last_poll = line[:19]
+                        break
+                if last_poll:
+                    print(f"    Last Poll:    {last_poll} UTC")
+            except OSError:
+                pass
+    else:
+        print(f"    State:        {Colors.RED}stopped{Colors.RESET}")
+        # Show last active time from daemon.log (Requirement 17.2)
+        from .daemon import LOG_FILE
+        if os.path.exists(LOG_FILE):
+            try:
+                mtime = os.path.getmtime(LOG_FILE)
+                from datetime import datetime, timezone
+                last_active = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                print(f"    Last Active:  {last_active.strftime('%Y-%m-%dT%H:%M:%S')} UTC")
+            except OSError:
+                pass
+
     print()
 
 
@@ -183,6 +223,17 @@ def _handle_daemon(args):
         if not success:
             sys.exit(1)
         print("Daemon stopped.")
+    elif args.daemon_command == "restart":
+        was_running = DaemonManager.is_running()
+        try:
+            new_pid = DaemonManager.restart()
+            if was_running:
+                print(f"Daemon restarted with new PID {new_pid}.")
+            else:
+                print(f"Daemon was not previously running. Started fresh with PID {new_pid}.")
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
     elif args.daemon_command == "status":
         status = DaemonManager.status()
         if status["running"]:
@@ -194,7 +245,7 @@ def _handle_daemon(args):
         output = DaemonManager.read_logs()
         print(output)
     else:
-        print("Usage: kognisant daemon {start|stop|status|logs}", file=sys.stderr)
+        print("Usage: kognisant daemon {start|stop|restart|status|logs}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -207,9 +258,13 @@ def _handle_job(args):
     elif args.job_command == "cancel":
         _handle_job_cancel(args.name)
     elif args.job_command == "logs":
-        _handle_job_logs(args.name)
+        _handle_job_logs(args.name, follow=getattr(args, 'follow', False))
+    elif args.job_command == "remove":
+        _handle_job_remove(args.name)
+    elif args.job_command == "edit":
+        _handle_job_edit(args)
     else:
-        print("Usage: kognisant job {add|list|cancel|logs}", file=sys.stderr)
+        print("Usage: kognisant job {add|list|cancel|logs|remove|edit}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -225,8 +280,9 @@ def _handle_job_add(args):
     # Validate job name (R7-AC10)
     if not JOB_NAME_PATTERN.match(name):
         print(
-            f"{Colors.RED}Error:{Colors.RESET} Invalid job name '{name}'. "
-            "Must be 1-64 characters, lowercase alphanumeric, hyphens, or underscores only.",
+            format_error("validation",
+                         f"Job name '{name}' is invalid",
+                         "Use lowercase alphanumeric, hyphens, or underscores (1-64 chars)."),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -235,8 +291,9 @@ def _handle_job_add(args):
     valid_types = ("scheduled", "persistent", "agent")
     if job_type not in valid_types:
         print(
-            f"{Colors.RED}Error:{Colors.RESET} Invalid job type '{job_type}'. "
-            f"Must be one of: {', '.join(valid_types)}",
+            format_error("validation",
+                         f"Invalid job type '{job_type}'",
+                         f"Must be one of: {', '.join(valid_types)}"),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -245,20 +302,32 @@ def _handle_job_add(args):
     if job_type == "scheduled":
         if not cron:
             print(
-                f"{Colors.RED}Error:{Colors.RESET} --cron is required for scheduled jobs.",
+                format_error("validation", "--cron is required for scheduled jobs"),
                 file=sys.stderr,
             )
             sys.exit(1)
         if not CronParser.validate(cron):
             print(
-                f"{Colors.RED}Error:{Colors.RESET} Invalid cron expression '{cron}'. "
-                "Expected 5 fields: minute hour day-of-month month day-of-week.",
+                format_error("validation",
+                             f"Invalid cron expression '{cron}'",
+                             "Expected 5 fields: minute hour day-of-month month day-of-week."),
                 file=sys.stderr,
             )
             sys.exit(1)
+        # Unmatchable cron warning (Requirement 34)
+        if not CronParser.can_match_within_days(cron):
+            print(
+                format_error("validation",
+                             f"Cron expression '{cron}' may never produce a match within 366 days"),
+                file=sys.stderr,
+            )
+            confirm = input("Do you want to create this job anyway? [y/N] ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Job creation cancelled.")
+                sys.exit(0)
         if not script:
             print(
-                f"{Colors.RED}Error:{Colors.RESET} --script is required for scheduled jobs.",
+                format_error("validation", "--script is required for scheduled jobs"),
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -266,7 +335,7 @@ def _handle_job_add(args):
     elif job_type == "persistent":
         if not script:
             print(
-                f"{Colors.RED}Error:{Colors.RESET} --script is required for persistent jobs.",
+                format_error("validation", "--script is required for persistent jobs"),
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -274,7 +343,7 @@ def _handle_job_add(args):
     elif job_type == "agent":
         if not task:
             print(
-                f"{Colors.RED}Error:{Colors.RESET} --task is required for agent jobs.",
+                format_error("validation", "--task is required for agent jobs"),
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -285,7 +354,8 @@ def _handle_job_add(args):
         script_path = os.path.join(scripts_dir, script)
         if not os.path.exists(script_path):
             print(
-                f"{Colors.RED}Error:{Colors.RESET} Script '{script}' not found in {scripts_dir}/",
+                format_error("not_found",
+                             f"Script '{script}' not found in {scripts_dir}/"),
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -296,13 +366,62 @@ def _handle_job_add(args):
         for env_str in env_args:
             if "=" not in env_str:
                 print(
-                    f"{Colors.RED}Error:{Colors.RESET} Invalid env format '{env_str}'. "
-                    "Expected KEY=VAL.",
+                    format_error("validation",
+                                 f"Invalid env format '{env_str}'",
+                                 "Expected KEY=VAL."),
                     file=sys.stderr,
                 )
                 sys.exit(1)
             key, val = env_str.split("=", 1)
             env_vars[key] = val
+
+    # Load env vars from --env-file if provided (Requirement 28.4)
+    env_file = getattr(args, "env_file", None)
+    if env_file:
+        if not os.path.exists(env_file):
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} Env file '{env_file}' not found.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            with open(env_file, "r") as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    # Skip empty lines and comments
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" not in line:
+                        print(
+                            f"{Colors.RED}Error:{Colors.RESET} Invalid format in "
+                            f"env file line {line_num}: '{line}'. Expected KEY=VAL.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    key, val = line.split("=", 1)
+                    env_vars[key.strip()] = val.strip()
+        except OSError as e:
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} Cannot read env file: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Unmatchable cron warning (Requirement 34)
+    if cron and job_type == "scheduled":
+        if not CronParser.can_match_within_days(cron):
+            print(
+                f"{Colors.YELLOW}Warning:{Colors.RESET} Cron expression '{cron}' may never match within 366 days.",
+                file=sys.stderr,
+            )
+            try:
+                confirm = input("Continue anyway? [y/N]: ").strip().lower()
+                if confirm not in ("y", "yes"):
+                    print("Aborted.")
+                    sys.exit(0)
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
+                sys.exit(0)
 
     # Build job config and add to queue (R7-AC8: lock acquired inside JobQueue)
     job_config = {
@@ -318,13 +437,22 @@ def _handle_job_add(args):
     try:
         result = queue.add_job(job_config)
         print(f"{Colors.GREEN}{result}{Colors.RESET}")
+
+        # Daemon-not-running warning (Requirement 16)
+        if not DaemonManager.is_running():
+            print(
+                f"{Colors.YELLOW}⚠️  Warning: daemon is not running, job will not execute "
+                f"until you run `kognisant daemon start`{Colors.RESET}"
+            )
     except ValueError as e:
         print(f"{Colors.RED}Error:{Colors.RESET} {e}", file=sys.stderr)
         sys.exit(1)
 
 
 def _handle_job_list():
-    """Handle `kognisant job list` — display all jobs in a table."""
+    """Handle `kognisant job list` — display all jobs in an enhanced table."""
+    from datetime import datetime, timezone
+
     queue = JobQueue()
     jobs = queue.load()
 
@@ -332,15 +460,20 @@ def _handle_job_list():
         print("No jobs in the queue.")
         return
 
+    now = datetime.now(timezone.utc)
+
     # Print table header
-    print(f"\n  {'NAME':<20} {'TYPE':<12} {'STATE':<12} {'LAST RUN':<20}")
-    print(f"  {'─' * 20} {'─' * 12} {'─' * 12} {'─' * 20}")
+    print(f"\n  {'NAME':<20} {'TYPE':<12} {'STATE':<12} {'RUN#':<5} {'EXIT':<5} {'LAST RUN':<22} {'NEXT RUN':<28} {'PID':<8}")
+    print(f"  {'─' * 20} {'─' * 12} {'─' * 12} {'─' * 5} {'─' * 5} {'─' * 22} {'─' * 28} {'─' * 8}")
 
     for job in jobs:
         name = job.get("name", "?")[:20]
         job_type = job.get("type", "?")
         state = job.get("state", "?")
-        last_run = job.get("last_run_at") or "—"
+        run_count = job.get("run_count", 0)
+        last_exit_code = job.get("last_exit_code")
+        last_run = job.get("last_run_at")
+        pid = job.get("pid")
 
         # Color-code state
         if state == "running":
@@ -352,7 +485,31 @@ def _handle_job_list():
         else:
             state_display = state
 
-        print(f"  {name:<20} {job_type:<12} {state_display:<22} {last_run:<20}")
+        # Format last_run with UTC suffix
+        last_run_display = f"{last_run} UTC" if last_run else "—"
+
+        # Calculate next_run_at for scheduled jobs
+        next_run_display = "—"
+        if job.get("type") == "scheduled" and job.get("cron_expression"):
+            try:
+                next_dt = CronParser.next_run(job["cron_expression"], now)
+                delta = next_dt - now
+                total_mins = int(delta.total_seconds() / 60)
+                if total_mins >= 60:
+                    hours = total_mins // 60
+                    mins = total_mins % 60
+                    relative = f"in {hours}h {mins}m"
+                else:
+                    relative = f"in {total_mins}m"
+                abs_str = next_dt.strftime("%Y-%m-%dT%H:%M") + " UTC"
+                next_run_display = f"{relative} ({abs_str})"
+            except (ValueError, TypeError):
+                next_run_display = "—"
+
+        exit_display = str(last_exit_code) if last_exit_code is not None else "—"
+        pid_display = str(pid) if pid and state == "running" else "—"
+
+        print(f"  {name:<20} {job_type:<12} {state_display:<22} {run_count:<5} {exit_display:<5} {last_run_display:<22} {next_run_display:<28} {pid_display:<8}")
 
     print()
 
@@ -364,14 +521,31 @@ def _handle_job_cancel(name: str):
 
     if job is None:
         print(
-            f"{Colors.RED}Error:{Colors.RESET} Job '{name}' not found.",
+            format_error("not_found", f"Job '{name}' does not exist",
+                         "Use 'kognisant job list' to see available jobs."),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Cancel state validation (Requirement 31)
+    current_state = job.get("state", "")
+    if current_state in TERMINAL_STATES:
+        print(
+            format_error("state", f"Job '{name}' is in '{current_state}' state and cannot be cancelled"),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if current_state not in CANCELLABLE_STATES:
+        print(
+            format_error("state", f"Job '{name}' is in '{current_state}' state and cannot be cancelled"),
             file=sys.stderr,
         )
         sys.exit(1)
 
     # If the job has a running subprocess, terminate it (R7-AC4,7)
     pid = job.get("pid")
-    if pid and job.get("state") == "running":
+    if pid and current_state == "running":
         import signal
         try:
             os.kill(pid, signal.SIGTERM)
@@ -383,31 +557,200 @@ def _handle_job_cancel(name: str):
         print(f"Job '{name}' cancelled.")
     else:
         print(
-            f"{Colors.RED}Error:{Colors.RESET} Failed to update job '{name}'.",
+            format_error("io", f"Failed to update job '{name}'"),
             file=sys.stderr,
         )
         sys.exit(1)
 
 
-def _handle_job_logs(name: str):
-    """Handle `kognisant job logs <name>` — show last 50 lines of job log."""
+def _handle_job_logs(name: str, follow: bool = False):
+    """Handle `kognisant job logs <name>` — show last 50 lines of job log.
+
+    With --follow: continuously display new lines (polls every 500ms).
+    """
+    import time as _time
+
     queue = JobQueue()
     job = queue.get_job(name)
 
     if job is None:
         print(
-            f"{Colors.RED}Error:{Colors.RESET} Job '{name}' not found.",
+            format_error("not_found", f"Job '{name}' does not exist",
+                         "Use 'kognisant job list' to see available jobs."),
             file=sys.stderr,
         )
         sys.exit(1)
 
-    output = queue.read_job_logs(name)
-    print(output)
+    if not follow:
+        output = queue.read_job_logs(name)
+        print(output)
+        return
+
+    # --follow mode: tail the log file with 500ms polling (Requirement 24)
+    log_path = queue.get_job_log_path(name)
+    if not os.path.exists(log_path):
+        print(f"No logs available for job '{name}'. Waiting for output...")
+
+    try:
+        # Open and seek to end
+        if os.path.exists(log_path):
+            with open(log_path, "r") as f:
+                # Print last 10 lines as context
+                f.seek(0, 2)
+                file_size = f.tell()
+                # Read last few KB for context
+                seek_pos = max(0, file_size - 4096)
+                f.seek(seek_pos)
+                if seek_pos > 0:
+                    f.readline()  # discard partial first line
+                tail_lines = f.readlines()
+                for line in tail_lines[-10:]:
+                    print(line, end="")
+                last_pos = f.tell()
+        else:
+            last_pos = 0
+
+        # Poll for new content every 500ms
+        while True:
+            _time.sleep(0.5)
+            if not os.path.exists(log_path):
+                continue
+            with open(log_path, "r") as f:
+                f.seek(last_pos)
+                new_content = f.read()
+                if new_content:
+                    print(new_content, end="", flush=True)
+                last_pos = f.tell()
+    except KeyboardInterrupt:
+        print(f"\n{Colors.CYAN}Follow mode stopped.{Colors.RESET}")
+        return
+
+
+def _handle_job_remove(name: str):
+    """Handle `kognisant job remove <name>` — remove job (terminates if running)."""
+    import signal as sig
+
+    queue = JobQueue()
+    job = queue.get_job(name)
+
+    if job is None:
+        print(
+            format_error("not_found", f"Job '{name}' does not exist",
+                         "Use 'kognisant job list' to see available jobs."),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # If running, terminate subprocess first (Requirement 21.4)
+    pid = job.get("pid")
+    if pid and job.get("state") == "running":
+        try:
+            os.kill(pid, sig.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    success = queue.remove_job(name)
+    if success:
+        print(f"Job '{name}' removed.")
+    else:
+        print(
+            format_error("io", f"Failed to remove job '{name}'"),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _handle_job_edit(args):
+    """Handle `kognisant job edit <name>` — edit job config in place.
+
+    Supports: --cron EXPR, --env KEY=VALUE (repeatable), --script PATH.
+    """
+    name = args.name
+    cron = getattr(args, 'cron', None)
+    env_args = getattr(args, 'env', None)
+    script = getattr(args, 'script', None)
+
+    if not cron and not env_args and not script:
+        print(
+            f"{Colors.RED}Error:{Colors.RESET} At least one modification flag is required "
+            "(--cron, --env, --script).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    queue = JobQueue()
+    job = queue.get_job(name)
+
+    if job is None:
+        print(
+            format_error("not_found", f"Job '{name}' does not exist",
+                         "Use 'kognisant job list' to see available jobs."),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Validate cron expression if provided
+    if cron:
+        if not CronParser.validate(cron):
+            print(
+                f"{Colors.RED}Error:{Colors.RESET} Invalid cron expression '{cron}'. "
+                "Expected 5 fields: minute hour day-of-month month day-of-week. "
+                "Note: cron expressions are evaluated in UTC.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Parse env vars
+    new_env = {}
+    if env_args:
+        for env_str in env_args:
+            if "=" not in env_str:
+                print(
+                    f"{Colors.RED}Error:{Colors.RESET} Invalid env format '{env_str}'. "
+                    "Expected KEY=VAL.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            key, val = env_str.split("=", 1)
+            new_env[key] = val
+
+    # Apply edits using _locked_modify
+    def _edit(jobs):
+        for j in jobs:
+            if j.get("name") == name:
+                if cron:
+                    j["cron_expression"] = cron
+                if script:
+                    j["script_path"] = script
+                if new_env:
+                    existing_env = j.get("env_vars", {})
+                    existing_env.update(new_env)
+                    j["env_vars"] = existing_env
+                break
+        return jobs
+
+    queue._locked_modify(_edit)
+
+    # Show warning if job is currently running (Requirement 26.3)
+    if job.get("state") == "running":
+        print(
+            f"{Colors.YELLOW}⚠️  Warning: Job '{name}' is currently running. "
+            f"Changes will take effect on the next execution cycle.{Colors.RESET}"
+        )
+
+    changes = []
+    if cron:
+        changes.append(f"cron_expression='{cron}'")
+    if script:
+        changes.append(f"script_path='{script}'")
+    if new_env:
+        changes.append(f"env_vars: {', '.join(f'{k}={v}' for k, v in new_env.items())}")
+    print(f"Job '{name}' updated: {', '.join(changes)}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="cli-kognisant: A Python CLI application."
+        description="cli-kognisant: Autonomous AI copilot with background job execution (POSIX-only daemon)."
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
@@ -459,32 +802,33 @@ def main():
 
     # --- Daemon subcommands ---
     daemon_parser = subparsers.add_parser(
-        "daemon", help="Manage the background daemon process"
+        "daemon", help="Manage the background daemon process (POSIX-only: Linux, macOS)"
     )
     daemon_subparsers = daemon_parser.add_subparsers(
         dest="daemon_command", help="Daemon actions"
     )
-    daemon_subparsers.add_parser("start", help="Start the background daemon")
-    daemon_subparsers.add_parser("stop", help="Stop the running daemon")
-    daemon_subparsers.add_parser("status", help="Show daemon status")
-    daemon_subparsers.add_parser("logs", help="Show daemon log output")
+    daemon_subparsers.add_parser("start", help="Start the background daemon (forks to background)")
+    daemon_subparsers.add_parser("stop", help="Stop the running daemon (sends SIGTERM, graceful shutdown)")
+    daemon_subparsers.add_parser("restart", help="Stop the running daemon and start a new one")
+    daemon_subparsers.add_parser("status", help="Show daemon running state, PID, and uptime")
+    daemon_subparsers.add_parser("logs", help="Show daemon log output (daemon.log)")
 
     # --- Job subcommands ---
     job_parser = subparsers.add_parser(
-        "job", help="Manage background jobs"
+        "job", help="Manage background jobs (add, list, cancel, remove, edit, logs)"
     )
     job_subparsers = job_parser.add_subparsers(
         dest="job_command", help="Job actions"
     )
 
     # job add
-    job_add_parser = job_subparsers.add_parser("add", help="Add a new job")
+    job_add_parser = job_subparsers.add_parser("add", help="Add a new job to the queue")
     job_add_parser.add_argument(
         "-n", "--name", required=True, help="Job name (1-64 chars, [a-z0-9_-])"
     )
     job_add_parser.add_argument(
         "-s", "--script", default=None,
-        help="Script name (required for scheduled/persistent jobs)"
+        help="Script name in ~/.kognisant_core/scripts/ (required for scheduled/persistent jobs)"
     )
     job_add_parser.add_argument(
         "-t", "--type", required=True, dest="job_type",
@@ -492,7 +836,10 @@ def main():
     )
     job_add_parser.add_argument(
         "-c", "--cron", default=None,
-        help="Cron expression (required for scheduled jobs)"
+        help=(
+            "Cron expression for scheduled jobs (5-field format: min hour dom month dow). "
+            "All cron expressions are evaluated in UTC."
+        )
     )
     job_add_parser.add_argument(
         "--task", default=None,
@@ -502,17 +849,50 @@ def main():
         "-e", "--env", action="append", default=None,
         help="Environment variable as KEY=VAL (repeatable)"
     )
+    job_add_parser.add_argument(
+        "--env-file", default=None, dest="env_file",
+        help=(
+            "Path to file containing environment variables (KEY=VAL per line). "
+            "Note: env vars are stored in plaintext in jobs.json; the system is "
+            "NOT a secrets manager. Use --env-file with chmod 600 files for "
+            "sensitive values."
+        ),
+    )
 
     # job list
-    job_subparsers.add_parser("list", help="List all jobs")
+    job_subparsers.add_parser("list", help="List all jobs with state, run count, exit code, and next run time")
 
     # job cancel
-    job_cancel_parser = job_subparsers.add_parser("cancel", help="Cancel a job")
+    job_cancel_parser = job_subparsers.add_parser("cancel", help="Cancel a job (sends SIGTERM if running)")
     job_cancel_parser.add_argument("name", help="Name of the job to cancel")
 
     # job logs
-    job_logs_parser = job_subparsers.add_parser("logs", help="Show job logs")
+    job_logs_parser = job_subparsers.add_parser("logs", help="Show job output logs")
     job_logs_parser.add_argument("name", help="Name of the job to show logs for")
+    job_logs_parser.add_argument(
+        "-f", "--follow", action="store_true", default=False,
+        help="Continuously display new lines (polls every 500ms, Ctrl+C to stop)"
+    )
+
+    # job remove
+    job_remove_parser = job_subparsers.add_parser("remove", help="Permanently remove a job (terminates if running)")
+    job_remove_parser.add_argument("name", help="Name of the job to remove")
+
+    # job edit
+    job_edit_parser = job_subparsers.add_parser("edit", help="Edit a job's configuration in place (--cron, --env, --script)")
+    job_edit_parser.add_argument("name", help="Name of the job to edit")
+    job_edit_parser.add_argument(
+        "-c", "--cron", default=None,
+        help="New cron expression (5-field format, evaluated in UTC)"
+    )
+    job_edit_parser.add_argument(
+        "-e", "--env", action="append", default=None,
+        help="Set/update environment variable as KEY=VAL (repeatable, merges with existing)"
+    )
+    job_edit_parser.add_argument(
+        "-s", "--script", default=None,
+        help="New script path (relative to ~/.kognisant_core/scripts/)"
+    )
 
     args = parser.parse_args()
 

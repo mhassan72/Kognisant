@@ -59,9 +59,15 @@ def create_script(
     description: str = "",
     env_vars: list[str] | None = None,
 ) -> str:
-    """Create a new script with metadata.
+    """Create a new script with metadata using atomic two-phase write.
 
-    Writes a .py file and a .json metadata sidecar to the scripts directory.
+    Sequence:
+    1. Write content to {name}.py.tmp
+    2. Write metadata to {name}.json.tmp
+    3. Rename {name}.py.tmp → {name}.py
+    4. Rename {name}.json.tmp → {name}.json
+
+    On failure at any step: remove all .tmp files, leave no artifacts.
 
     Args:
         name: Script name (validated).
@@ -79,6 +85,8 @@ def create_script(
     scripts_dir = _get_scripts_dir()
     script_path = os.path.join(scripts_dir, f"{name}.py")
     metadata_path = os.path.join(scripts_dir, f"{name}.json")
+    script_tmp = os.path.join(scripts_dir, f"{name}.py.tmp")
+    metadata_tmp = os.path.join(scripts_dir, f"{name}.json.tmp")
 
     # R6-AC7: Check if script already exists
     if os.path.exists(script_path) or os.path.exists(metadata_path):
@@ -92,23 +100,47 @@ def create_script(
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
-    # Write files - R6-AC12: preserve previous state on filesystem error
+    def _cleanup_tmp():
+        """Remove all .tmp files on failure."""
+        for tmp in (script_tmp, metadata_tmp):
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    # Phase 1: Write temp files
     try:
-        with open(script_path, "w", encoding="utf-8") as f:
+        with open(script_tmp, "w", encoding="utf-8") as f:
             f.write(content)
     except OSError as e:
+        _cleanup_tmp()
         return f"Error: Failed to write script file: {e}"
 
     try:
-        with open(metadata_path, "w", encoding="utf-8") as f:
+        with open(metadata_tmp, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
     except OSError as e:
-        # Rollback: remove the .py file since metadata write failed
+        _cleanup_tmp()
+        return f"Error: Failed to write metadata file: {e}"
+
+    # Phase 2: Atomic renames
+    try:
+        os.rename(script_tmp, script_path)
+    except OSError as e:
+        _cleanup_tmp()
+        return f"Error: Failed to finalize script file: {e}"
+
+    try:
+        os.rename(metadata_tmp, metadata_path)
+    except OSError as e:
+        # Rollback: remove the already-renamed .py file
         try:
             os.remove(script_path)
         except OSError:
             pass
-        return f"Error: Failed to write metadata file: {e}"
+        _cleanup_tmp()
+        return f"Error: Failed to finalize metadata file: {e}"
 
     return f"Script '{name}' created successfully"
 

@@ -73,7 +73,7 @@ class TestJobStopSlashCommand(unittest.TestCase):
             result = process_slash_commands("/job stop ghost-job", self.project_info, self.history)
 
         self.assertTrue(result)
-        self.assertIn("not found", mock_out.getvalue())
+        self.assertIn("does not exist", mock_out.getvalue())
 
     @patch("cli_kognisant.jobs.JobQueue.update_status")
     @patch("cli_kognisant.jobs.JobQueue.get_job")
@@ -89,7 +89,7 @@ class TestJobStopSlashCommand(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertIn("stopped", mock_out.getvalue())
-        mock_update.assert_called_once_with("my-bot", "cancelled")
+        mock_update.assert_called_once_with("my-bot", "cancelled", pid=None)
 
 
 class TestJobLogsSlashCommand(unittest.TestCase):
@@ -113,7 +113,7 @@ class TestJobLogsSlashCommand(unittest.TestCase):
             result = process_slash_commands("/job logs ghost-job", self.project_info, self.history)
 
         self.assertTrue(result)
-        self.assertIn("not found", mock_out.getvalue())
+        self.assertIn("does not exist", mock_out.getvalue())
 
     @patch("cli_kognisant.jobs.JobQueue.read_job_logs")
     @patch("cli_kognisant.jobs.JobQueue.get_job")
@@ -154,7 +154,7 @@ class TestJobRestartSlashCommand(unittest.TestCase):
             result = process_slash_commands("/job restart ghost-job", self.project_info, self.history)
 
         self.assertTrue(result)
-        self.assertIn("not found", mock_out.getvalue())
+        self.assertIn("does not exist", mock_out.getvalue())
 
     @patch("cli_kognisant.jobs.JobQueue.update_status")
     @patch("cli_kognisant.jobs.JobQueue.get_job")
@@ -273,7 +273,8 @@ class TestHelpUpdated(unittest.TestCase):
 
         self.assertTrue(result)
         output = mock_out.getvalue()
-        self.assertIn("Daemon & Jobs", output)
+        self.assertIn("Daemon", output)
+        self.assertIn("Jobs", output)
         self.assertIn("/daemon", output)
         self.assertIn("/jobs", output)
 

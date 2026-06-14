@@ -335,7 +335,7 @@ This is useful for:
 
 ## Cross-References
 
-- [Architecture](architecture.md) — System overview and daemon process model
-- [Execution Engine](execution-engine.md) — Atomic writes and PID reuse protection
-- [CLI Reference](cli-reference.md) — Commands that create and manage jobs
-- [Cron Scheduling](cron-scheduling.md) — CronParser details for scheduled jobs
+- [Architecture](architecture.md) - System overview and daemon process model
+- [Execution Engine](execution-engine.md) - Atomic writes and PID reuse protection
+- [CLI Reference](cli-reference.md) - Commands that create and manage jobs
+- [Cron Scheduling](cron-scheduling.md) - CronParser details for scheduled jobs

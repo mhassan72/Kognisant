@@ -54,10 +54,10 @@ _atomic_save(data):
 
 ### Why This Order Matters
 
-1. **Write to temp first**: If we crash during the write, only the temp file is affected — the real `jobs.json` is untouched.
+1. **Write to temp first**: If we crash during the write, only the temp file is affected - the real `jobs.json` is untouched.
 2. **fsync before rename**: Ensures the data is actually on disk, not just in the OS page cache.
 3. **chmod before rename**: The file has correct permissions before it becomes visible to other processes.
-4. **Atomic rename**: On POSIX, `rename()` is guaranteed atomic — readers see either the old file or the new file, never a partial state.
+4. **Atomic rename**: On POSIX, `rename()` is guaranteed atomic - readers see either the old file or the new file, never a partial state.
 5. **Directory fsync**: Without this, a crash could lose the directory entry update even though the file data is on disk.
 6. **Backup after success**: The `.bak` file always represents the last known-good state.
 
@@ -67,7 +67,7 @@ _atomic_save(data):
 |--------------|--------|
 | Crash during temp write | Orphaned `.tmp` file, `jobs.json` unchanged |
 | Crash after fsync, before rename | Same as above |
-| Crash during rename | POSIX guarantees atomicity — impossible to be partial |
+| Crash during rename | POSIX guarantees atomicity - impossible to be partial |
 | Crash after rename, before dir fsync | File exists but may not survive reboot on some filesystems (unlikely but possible) |
 | Crash during backup copy | Primary is safe; backup may be stale (recovered on next successful write) |
 
@@ -252,7 +252,7 @@ def _locked_modify(self, fn: Callable[[list[dict]], list[dict]]) -> None:
     4. Atomic save the modified state
     5. Release lock
 
-    The lock is held for the entire duration — no other process can
+    The lock is held for the entire duration - no other process can
     read or write jobs.json between our load and save.
     """
     with FileLock(self.LOCK_PATH, timeout=5.0):
@@ -265,7 +265,7 @@ def _locked_modify(self, fn: Callable[[list[dict]], list[dict]]) -> None:
 
 - **Single-user model**: Kognisant assumes one user with one daemon. Advisory locks prevent race conditions between the CLI and daemon.
 - **Non-blocking check**: Uses `LOCK_NB` with polling to implement timeout behavior.
-- **No mandatory locks**: Advisory locks are cooperative — all participants must use them. Since we control both the CLI and daemon, this is sufficient.
+- **No mandatory locks**: Advisory locks are cooperative - all participants must use them. Since we control both the CLI and daemon, this is sufficient.
 
 ## StreamReader Thread Architecture
 
@@ -400,7 +400,7 @@ for job in get_due_in_range(jump_start, jump_end):
 
 ## Orphan Cleanup with PID Reuse Protection
 
-On daemon startup, jobs marked as "running" need verification — their processes may have died while the daemon was down.
+On daemon startup, jobs marked as "running" need verification - their processes may have died while the daemon was down.
 
 ### The PID Reuse Problem
 
@@ -414,22 +414,22 @@ def orphan_cleanup():
         pid = job["pid"]
 
         if not ProcessManager.is_alive(pid):
-            # Process is dead — safe to mark as failed
+            # Process is dead - safe to mark as failed
             update_status(job["name"], "failed", error="Orphaned process not found")
             continue
 
-        # Process IS alive — but is it OUR process?
+        # Process IS alive - but is it OUR process?
         actual_start_time = ProcessManager.get_start_time(pid)
         expected_start_time = job["pid_started_at"]
 
         if actual_start_time != expected_start_time:
             # PID was reused by a different process!
-            # Do NOT send any signal — just mark the job as failed
+            # Do NOT send any signal - just mark the job as failed
             update_status(job["name"], "failed",
                          error="PID reused by another process")
             job["pid"] = None
         else:
-            # Same process — it's still running, leave it alone
+            # Same process - it's still running, leave it alone
             pass
 ```
 
@@ -505,7 +505,7 @@ def _create_pid_file(pid: int) -> None:
    └─ FAILURE (FileExistsError) → Another instance won the race, abort
 ```
 
-The `O_EXCL` flag makes the `open()` call fail atomically if the file already exists — even if another process created it in the nanoseconds between our stale check and our create attempt.
+The `O_EXCL` flag makes the `open()` call fail atomically if the file already exists - even if another process created it in the nanoseconds between our stale check and our create attempt.
 
 ## RotatingFileHandler for daemon.log
 
@@ -536,11 +536,11 @@ def _rotate_job_log(log_path: str) -> None:
         # New writes will create a fresh log_path
 ```
 
-Key difference from `RotatingFileHandler`: The daemon holds no persistent file handles to job logs. Each `StreamReader._append_line()` opens, writes, and closes the log file. This means rotation via rename is safe — no write-after-rename race.
+Key difference from `RotatingFileHandler`: The daemon holds no persistent file handles to job logs. Each `StreamReader._append_line()` opens, writes, and closes the log file. This means rotation via rename is safe - no write-after-rename race.
 
 ## Cross-References
 
-- [Architecture](architecture.md) — System overview and module relationships
-- [Job Lifecycle](job-lifecycle.md) — Job state machine and execution flows
-- [Security](security.md) — Permission model and symlink protection
-- [Testing](testing.md) — How these components are tested
+- [Architecture](architecture.md) - System overview and module relationships
+- [Job Lifecycle](job-lifecycle.md) - Job state machine and execution flows
+- [Security](security.md) - Permission model and symlink protection
+- [Testing](testing.md) - How these components are tested

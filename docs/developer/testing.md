@@ -32,7 +32,7 @@ tests/
 
 ## conftest.py Fixtures
 
-The `conftest.py` provides opt-in fixtures for isolated filesystem testing. These fixtures are **NOT autouse** — tests must explicitly request them to avoid breaking existing tests.
+The `conftest.py` provides opt-in fixtures for isolated filesystem testing. These fixtures are **NOT autouse** - tests must explicitly request them to avoid breaking existing tests.
 
 ### `tmp_core_dir`
 
@@ -335,6 +335,6 @@ class TestFeatureName:
 
 ## Cross-References
 
-- [Architecture](architecture.md) — Module structure and responsibilities
-- [Execution Engine](execution-engine.md) — Internals being tested
-- [Security](security.md) — Security test cases
+- [Architecture](architecture.md) - Module structure and responsibilities
+- [Execution Engine](execution-engine.md) - Internals being tested
+- [Security](security.md) - Security test cases

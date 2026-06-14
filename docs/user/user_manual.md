@@ -1,6 +1,6 @@
-# Kognisant 🧠 — Comprehensive User Manual
+# Kognisant 🧠 - Comprehensive User Manual
 
-Welcome to **Kognisant**! Kognisant is an autonomous, self-evolving, model-agnostic software engineering copilot and multi-agent framework. By leveraging a dual-memory system—local **Membrain** project context and global **Core Memory** universal skills—Kognisant operates as a "compiled system," marrying static verification, persistent long-term state tracking, and parallel autonomous swarms.
+Welcome to **Kognisant**! Kognisant is an autonomous, self-evolving, model-agnostic software engineering copilot and multi-agent framework. By leveraging a dual-memory system - local **Membrain** project context and global **Core Memory** universal skills - Kognisant operates as a "compiled system," marrying static verification, persistent long-term state tracking, and parallel autonomous swarms.
 
 This manual provides an exhaustive guide to installing, configuring, and interacting with Kognisant.
 
@@ -28,7 +28,7 @@ This manual provides an exhaustive guide to installing, configuring, and interac
 
 ## 1. Core Philosophy & Architecture
 
-Most AI coding tools operate in a vacuum—they forget what you built as soon as you clear your chat or open a new session. Kognisant solves this by compiling and persisting context dynamically. It treats software engineering as a continuous state machine:
+Most AI coding tools operate in a vacuum - they forget what you built as soon as you clear your chat or open a new session. Kognisant solves this by compiling and persisting context dynamically. It treats software engineering as a continuous state machine:
 
 ```mermaid
 graph TD
@@ -53,7 +53,7 @@ Kognisant is distributed as a free-to-use, zero-dependency command-line utility.
 
 ### System Requirements
 *   **Python**: Version `3.10` or newer (Python `3.12` recommended).
-*   **Operating System**: macOS, Linux (POSIX-compliant only). **Windows is not supported** — see [Platform Requirements](#platform-requirements) below.
+*   **Operating System**: macOS, Linux (POSIX-compliant only). **Windows is not supported** - see [Platform Requirements](#platform-requirements) below.
 *   **Web Scraping Engine** (Optional but highly recommended): Standard Google Chrome or Brave Browser installed on your machine for headless background web browsing and DOM rendering.
 
 ### Platform Requirements
@@ -62,7 +62,7 @@ The Autonomous Execution Engine (daemon, background jobs, job scheduling) suppor
 
 - ✅ **Linux** (all major distributions)
 - ✅ **macOS** (10.15 Catalina and later)
-- ❌ **Windows** — not supported (including WSL for daemon features)
+- ❌ **Windows** - not supported (including WSL for daemon features)
 
 The execution engine requires the following POSIX-specific system calls:
 
@@ -388,7 +388,7 @@ The jobs file (`~/.kognisant_core/jobs.json`) uses a versioned format to support
 - If the version is recognized and current, the file is processed normally
 - If the version is recognized but older, automatic forward-migration is applied
 
-### Unrecognized Versions — Hard Failure
+### Unrecognized Versions - Hard Failure
 
 If `jobs.json` contains a `schema_version` higher than what your installed Kognisant version understands, the system **refuses to process the file** and raises an error:
 
@@ -434,8 +434,8 @@ Kognisant enforces timeout limits to prevent runaway processes:
 ### Persistent Job Exit Behavior
 
 For persistent (long-running) jobs:
-- **`exit(0)` = intentional completion** — the daemon treats this as the script completing successfully and does **not** restart it. The job state becomes "completed".
-- **`exit(non-zero)` = crash** — the daemon auto-restarts the job after a 5-second delay (subject to crash loop detection).
+- **`exit(0)` = intentional completion** - the daemon treats this as the script completing successfully and does **not** restart it. The job state becomes "completed".
+- **`exit(non-zero)` = crash** - the daemon auto-restarts the job after a 5-second delay (subject to crash loop detection).
 
 ---
 
@@ -459,7 +459,7 @@ The daemon uses `time.monotonic()` internally. If the elapsed monotonic time bet
 The `scheduler_policy` field is part of the job definition. It defaults to `"skip"` if not specified:
 
 ```bash
-# The default behavior — skip missed executions
+# The default behavior - skip missed executions
 kognisant job add --name backup --script backup.py --type scheduled --cron "0 3 * * *"
 
 # To enable catchup behavior, edit the job:
@@ -573,7 +573,7 @@ All displayed timestamps for `next_run_at` and `last_run_at` include a "UTC" suf
 
 ## 16. Daemon & Background Jobs
 
-Kognisant includes a built-in background daemon that can run scripts autonomously — bots, cron jobs, monitoring tasks, and AI agent work — without keeping a terminal open.
+Kognisant includes a built-in background daemon that can run scripts autonomously - bots, cron jobs, monitoring tasks, and AI agent work - without keeping a terminal open.
 
 > **Note:** The daemon requires a POSIX-compliant system (Linux or macOS). See [Platform Requirements](#platform-requirements).
 
@@ -640,9 +640,9 @@ kognisant job edit my-bot --script new-bot.py
 ```
 
 Flags:
-- `--cron EXPR` — New cron expression (note: evaluated in UTC)
-- `--env KEY=VALUE` — Set/update environment variable (repeatable)
-- `--script PATH` — New script path (relative to `~/.kognisant_core/scripts/`)
+- `--cron EXPR` - New cron expression (note: evaluated in UTC)
+- `--env KEY=VALUE` - Set/update environment variable (repeatable)
+- `--script PATH` - New script path (relative to `~/.kognisant_core/scripts/`)
 
 If the job is currently running, you'll see a warning:
 ```

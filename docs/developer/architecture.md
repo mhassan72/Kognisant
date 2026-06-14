@@ -29,7 +29,7 @@
                     │                                     │
                     ▼                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    JOBS MODULE (jobs.py) — Versioned State Layer           │
+│                    JOBS MODULE (jobs.py) - Versioned State Layer           │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  JobQueue              CronParser             FileLock                     │
 │  ─────────             ──────────             ────────                    │
@@ -46,7 +46,7 @@
                                      │ polled every 15s
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                DAEMON MODULE (daemon.py) — Execution Layer                 │
+│                DAEMON MODULE (daemon.py) - Execution Layer                 │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  DaemonManager                    ProcessManager                          │
 │  ──────────────                   ──────────────                          │
@@ -70,7 +70,7 @@
                                      │ spawns subprocesses
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                  SCRIPTS + PERP — Execution Targets                        │
+│                  SCRIPTS + PERP - Execution Targets                        │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  scripts.py (atomic create)        agents.py                              │
 │  ──────────────────────────        ─────────                              │
@@ -85,11 +85,11 @@
 
 ## Module Responsibilities
 
-### `main.py` — CLI Entry Point
+### `main.py` - CLI Entry Point
 
 The argparse-based command-line interface. Registers subcommands (`init`, `chat`, `greet`, `spec`, `daemon`, `job`, `status`, `awesome_feature`) and dispatches to handler functions. Handles argument validation and user-facing output formatting.
 
-### `chat.py` — Interactive Chat Loop
+### `chat.py` - Interactive Chat Loop
 
 Manages the multi-turn conversation session including:
 - Slash command parsing and dispatch (`/help`, `/model`, `/agent`, `/jobs`, `/daemon`, etc.)
@@ -98,7 +98,7 @@ Manages the multi-turn conversation session including:
 - Model selection wizard
 - Tool call processing loop (parse tool_calls → execute → append results → re-query)
 
-### `config.py` — Configuration Management
+### `config.py` - Configuration Management
 
 Handles all configuration state:
 - Global Core initialization (`~/.kognisant_core/` structure)
@@ -107,7 +107,7 @@ Handles all configuration state:
 - Model pool management (load, save, set default)
 - Provider configuration
 
-### `agents.py` — PERP Orchestration
+### `agents.py` - PERP Orchestration
 
 The autonomous agent swarm engine:
 - **Plan**: Decomposes tasks into phased subtasks via LLM
@@ -117,7 +117,7 @@ The autonomous agent swarm engine:
 
 Uses `threading.Thread` with `daemon=True` for subtask workers. Local model tasks are throttled via a `threading.Semaphore(MAX_LOCAL_CONCURRENCY)`.
 
-### `network.py` — API Transport
+### `network.py` - API Transport
 
 OpenAI-compatible HTTP client with:
 - Exponential backoff retry (3 attempts, delays: 1s, 2s, 4s)
@@ -126,7 +126,7 @@ OpenAI-compatible HTTP client with:
 - SSL context creation per request
 - Response streaming support
 
-### `tools.py` — Tool Specifications & Execution
+### `tools.py` - Tool Specifications & Execution
 
 Defines the OpenAI function-calling tool schemas and implements tool handlers:
 - **Workspace tools**: `read_project_file`, `edit_project_file`, `list_project_files`, `create_project_file`, `create_project_directory`, `delete_project_path`
@@ -136,7 +136,7 @@ Defines the OpenAI function-calling tool schemas and implements tool handlers:
 
 All file tools enforce workspace sandboxing via `os.path.realpath()`.
 
-### `daemon.py` — Background Daemon
+### `daemon.py` - Background Daemon
 
 The forked background process that manages job execution:
 - `DaemonManager`: Lifecycle (start/stop/restart/status), fork with FD cleanup, PID file with race prevention
@@ -144,7 +144,7 @@ The forked background process that manages job execution:
 - `StreamReader`: Daemon threads for live stdout/stderr capture
 - `_main_loop()`: Polling loop with orphan cleanup, clock jump detection, scheduler policy evaluation
 
-### `jobs.py` — Versioned Job Queue
+### `jobs.py` - Versioned Job Queue
 
 State management layer with crash-safe persistence:
 - `JobQueue`: CRUD operations using `_locked_modify` for atomic read-modify-write
@@ -153,14 +153,14 @@ State management layer with crash-safe persistence:
 - `MigrationRegistry`: Forward-only schema migration framework
 - Atomic write sequence with backup creation
 
-### `scripts.py` — Script CRUD
+### `scripts.py` - Script CRUD
 
 Manages user scripts in `~/.kognisant_core/scripts/`:
 - Atomic two-phase script creation (`.py.tmp` + `.json.tmp` → rename both)
 - Script name validation
 - Symlink containment via `os.path.realpath()` check
 
-### `colors.py` — Terminal UI
+### `colors.py` - Terminal UI
 
 ANSI terminal rendering utilities:
 - True-color RGB fade-in logo animation
@@ -292,7 +292,7 @@ ProcessManager.spawn(script_path, env, job_context, cwd):
 
 ## Cross-References
 
-- [Execution Engine](execution-engine.md) — Atomic write and recovery internals
-- [Job Lifecycle](job-lifecycle.md) — State machine and execution flows
-- [Security](security.md) — Symlink containment and permission model
-- [CLI Reference](cli-reference.md) — All commands and flags
+- [Execution Engine](execution-engine.md) - Atomic write and recovery internals
+- [Job Lifecycle](job-lifecycle.md) - State machine and execution flows
+- [Security](security.md) - Symlink containment and permission model
+- [CLI Reference](cli-reference.md) - All commands and flags

@@ -25,5 +25,5 @@ Technical documentation for Kognisant contributors and maintainers. These docume
 
 - All timestamps in the system are UTC unless otherwise noted
 - The daemon targets POSIX platforms only (Linux, macOS)
-- Zero external dependencies — everything uses the Python 3.10+ standard library
+- Zero external dependencies - everything uses the Python 3.10+ standard library
 - File paths use `~/.kognisant_core/` for the global core directory

@@ -1,4 +1,4 @@
-# Kognisant 🧠 — User Journey Scenarios
+# Kognisant 🧠 - User Journey Scenarios
 
 This guide provides simple, step-by-step stories (journeys) to help you understand exactly how to use Kognisant. Whether you are a professional coder or just starting out, these scenarios show you how to talk to your AI assistant and get things done.
 
@@ -15,13 +15,13 @@ This guide provides simple, step-by-step stories (journeys) to help you understa
     ```
     How would you like to connect?
 
-      [1] 🏠 Local Model (Ollama)        — Free, private
-      [2] 🏠 Local Model (Llama.cpp)     — Free, point to a running server
-      [3] ☁️  Cloud API (OpenAI)          — Requires API key
-      [4] ☁️  Cloud API (Groq)            — Requires API key, fast inference
-      [5] ☁️  Cloud API (DeepSeek)        — Requires API key, affordable
-      [6] ☁️  Cloud API (Custom endpoint) — Any OpenAI-compatible server
-      [7] 🔌 Skip — I'll configure later
+      [1] 🏠 Local Model (Ollama)        - Free, private
+      [2] 🏠 Local Model (Llama.cpp)     - Free, point to a running server
+      [3] ☁️  Cloud API (OpenAI)          - Requires API key
+      [4] ☁️  Cloud API (Groq)            - Requires API key, fast inference
+      [5] ☁️  Cloud API (DeepSeek)        - Requires API key, affordable
+      [6] ☁️  Cloud API (Custom endpoint) - Any OpenAI-compatible server
+      [7] 🔌 Skip - I'll configure later
     ```
 3.  **Enter your API key** (for cloud providers) or **select a local model** (for Ollama).
 4.  **Kognisant tests the connection** and confirms you're ready.
@@ -110,11 +110,11 @@ This guide provides simple, step-by-step stories (journeys) to help you understa
 
 4.  **Or manage specs from inside chat**:
     ```
-    /spec list                — See all specs with status
-    /spec auth_module         — Load context into chat
-    /spec auth_module run     — Execute next task
-    /spec auth_module run all — Execute all remaining
-    /spec auth_module done    — Mark current task complete
+    /spec list                - See all specs with status
+    /spec auth_module         - Load context into chat
+    /spec auth_module run     - Execute next task
+    /spec auth_module run all - Execute all remaining
+    /spec auth_module done    - Mark current task complete
     ```
 
 ---
@@ -134,8 +134,8 @@ This guide provides simple, step-by-step stories (journeys) to help you understa
 
 3.  **Check what changed**:
     ```
-    /context    — See updated project state
-    /files      — See new files created
+    /context    - See updated project state
+    /files      - See new files created
     ```
 
 ---
@@ -189,7 +189,7 @@ Output:
       [3] gpt-4o-mini (OpenAI) 🟡
       [a] Add custom provider / model
     ```
-3.  **Select a number** to switch instantly, or **press 'a'** to add a new provider with templates (just pick a provider and enter your key — no manual URL entry needed).
+3.  **Select a number** to switch instantly, or **press 'a'** to add a new provider with templates (just pick a provider and enter your key - no manual URL entry needed).
 
 ---
 
@@ -507,7 +507,7 @@ The log is polled every 500ms for new content.
     - `jobs.json` is protected with `0o600` permissions (owner-only)
     - But any process running as your user can still read it
     - For maximum security, consider using a dedicated service account
-    - The system is NOT a secrets manager — for high-security environments, use a proper vault
+    - The system is NOT a secrets manager - for high-security environments, use a proper vault
 
 ---
 
@@ -520,4 +520,4 @@ The log is polled every 500ms for new content.
 -   **Safety first**: Kognisant never touches files outside your project root or `~/.kognisant_core/`.
 
 ---
-*Kognisant is built to be your partner. Talk to it naturally — it handles the technical details.*
+*Kognisant is built to be your partner. Talk to it naturally - it handles the technical details.*

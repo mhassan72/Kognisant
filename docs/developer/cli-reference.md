@@ -22,9 +22,9 @@ kognisant init
 ```
 
 **Creates:**
-- `.kognisant/config.json` — Workspace configuration
-- `.kognisant/context.md` — Persistent Membrain template
-- `.kognisant/history/` — Session log directory
+- `.kognisant/config.json` - Workspace configuration
+- `.kognisant/context.md` - Persistent Membrain template
+- `.kognisant/history/` - Session log directory
 - Registers project in `~/.kognisant_core/projects.json`
 
 **Behavior:**
@@ -499,7 +499,7 @@ These tools are available to the LLM via the OpenAI function-calling interface:
 
 ## Cross-References
 
-- [Architecture](architecture.md) — Module that implements each command
-- [Job Lifecycle](job-lifecycle.md) — State machine and execution semantics
-- [Cron Scheduling](cron-scheduling.md) — Cron expression syntax and validation
-- [Security](security.md) — Error handling for security violations
+- [Architecture](architecture.md) - Module that implements each command
+- [Job Lifecycle](job-lifecycle.md) - State machine and execution semantics
+- [Cron Scheduling](cron-scheduling.md) - Cron expression syntax and validation
+- [Security](security.md) - Error handling for security violations

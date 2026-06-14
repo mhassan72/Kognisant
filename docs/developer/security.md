@@ -43,7 +43,7 @@ def _resolve_script_path(script_path: str) -> str:
 
 ### Key Details
 
-- **`os.path.realpath()`** resolves ALL symlinks in the entire path — not just the final component.
+- **`os.path.realpath()`** resolves ALL symlinks in the entire path - not just the final component.
 - We also call `os.path.realpath()` on `SCRIPTS_DIR` itself, in case the scripts directory is a symlink.
 - The trailing `os.sep` prevents prefix confusion (e.g., `/scripts` vs `/scripts-evil`).
 
@@ -99,7 +99,7 @@ Permissions are set at two critical moments:
 
 - Any process running as the same user can still read `jobs.json`
 - Environment variables are stored in **plaintext** (not encrypted)
-- The system is **NOT** a secrets manager — for high-security environments, use a proper vault (HashiCorp Vault, AWS Secrets Manager, etc.)
+- The system is **NOT** a secrets manager - for high-security environments, use a proper vault (HashiCorp Vault, AWS Secrets Manager, etc.)
 
 ## Root Privilege Warning
 
@@ -130,7 +130,7 @@ def _check_root_privileges():
 1. **CLI side** (before fork): Prints warning to terminal so the user sees it immediately
 2. **Daemon side** (after fork): Logs warning to `daemon.log` for audit trail
 
-The warning is informational — the daemon does not refuse to start as root. Some deployments may legitimately require root (e.g., binding to privileged ports).
+The warning is informational - the daemon does not refuse to start as root. Some deployments may legitimately require root (e.g., binding to privileged ports).
 
 ## Directory Traversal Protection
 
@@ -281,7 +281,7 @@ except Exception:
 import fcntl
 
 fd = open("jobs.lock", "w")
-fcntl.flock(fd, fcntl.LOCK_EX)  # Exclusive lock — blocks until acquired
+fcntl.flock(fd, fcntl.LOCK_EX)  # Exclusive lock - blocks until acquired
 # ... critical section ...
 fcntl.flock(fd, fcntl.LOCK_UN)  # Release
 fd.close()
@@ -313,7 +313,7 @@ The `jobs.lock` file protects the `_locked_modify` cycle:
 - Daemon state updates (running, completed, failed)
 - Both use the same lock file, so they coordinate safely
 
-### Lock Not Acquired — Error
+### Lock Not Acquired - Error
 
 ```
 Error: timeout - Could not acquire file lock within 5 seconds.
@@ -327,7 +327,7 @@ This typically means:
 
 ## Cross-References
 
-- [Architecture](architecture.md) — Process model and file system layout
-- [Execution Engine](execution-engine.md) — Atomic write sequence and FD cleanup
-- [CLI Reference](cli-reference.md) — `--env-file` flag documentation
-- [Testing](testing.md) — Security-related test cases
+- [Architecture](architecture.md) - Process model and file system layout
+- [Execution Engine](execution-engine.md) - Atomic write sequence and FD cleanup
+- [CLI Reference](cli-reference.md) - `--env-file` flag documentation
+- [Testing](testing.md) - Security-related test cases

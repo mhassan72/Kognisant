@@ -214,7 +214,7 @@ def can_match_within_days(expression: str, days: int = 366) -> bool:
     return False
 ```
 
-> **Performance note**: This is O(days × 1440) in the worst case (366 × 1440 = 527,040 iterations). It only runs once during job creation — not during polling. For most expressions, it short-circuits on the first match (first day or first few days).
+> **Performance note**: This is O(days × 1440) in the worst case (366 × 1440 = 527,040 iterations). It only runs once during job creation - not during polling. For most expressions, it short-circuits on the first match (first day or first few days).
 
 ### When It's Called
 
@@ -343,7 +343,7 @@ def handle_clock_jump(elapsed_seconds: float):
 ### Setting the Policy
 
 ```bash
-# Default is "skip" — missed runs are silently dropped
+# Default is "skip" - missed runs are silently dropped
 kognisant job add --name backup --script backup.py --type scheduled --cron "0 3 * * *"
 
 # For critical jobs that must run at least once:
@@ -359,7 +359,7 @@ kognisant job edit backup --scheduler-policy catchup_once
 | Affected by suspend/resume | Pauses during suspend | Jumps forward |
 | Use case | Measuring elapsed intervals | Determining wall-clock time |
 
-The daemon uses `time.monotonic()` for interval measurement. When monotonic elapsed time exceeds the threshold, it means the process was suspended — the system clock jumped forward while the daemon was asleep.
+The daemon uses `time.monotonic()` for interval measurement. When monotonic elapsed time exceeds the threshold, it means the process was suspended - the system clock jumped forward while the daemon was asleep.
 
 ## Common Cron Patterns
 
@@ -396,7 +396,7 @@ Do you want to create this job anyway? [y/N]
 
 ## Cross-References
 
-- [Job Lifecycle](job-lifecycle.md) — How scheduled jobs are executed
-- [Execution Engine](execution-engine.md) — Clock jump detection mechanism
-- [CLI Reference](cli-reference.md) — `--cron` flag usage
-- [Architecture](architecture.md) — CronParser's place in the system
+- [Job Lifecycle](job-lifecycle.md) - How scheduled jobs are executed
+- [Execution Engine](execution-engine.md) - Clock jump detection mechanism
+- [CLI Reference](cli-reference.md) - `--cron` flag usage
+- [Architecture](architecture.md) - CronParser's place in the system

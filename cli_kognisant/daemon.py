@@ -42,6 +42,17 @@ LOG_FILE = os.path.join(CORE_DIR, "daemon.log")
 _shutdown_flag = False
 _reload_flag = False
 
+# --- World Model job type constants (Requirement 18) ---
+WM_JOB_OBSERVE = "wm_observe"
+WM_JOB_DECAY_TICK = "wm_decay_tick"
+WM_JOB_STATIC_ANALYSIS = "wm_static_analysis"
+WM_JOB_GENERATE_GOALS = "wm_generate_goals"
+
+# Intervals for world model jobs
+_WM_DECAY_TICK_INTERVAL = 3600  # 60 minutes in seconds
+_WM_GIT_POLL_INTERVAL = 300  # 5 minutes in seconds
+_WM_RETRY_DELAY = 300  # 5 minutes in seconds
+
 
 def _sigterm_handler(signum, frame):
     """Handle SIGTERM: set graceful shutdown flag (R12-AC1)."""
@@ -526,6 +537,408 @@ def _resolve_script_path(job: dict) -> str | None:
     return abs_path
 
 
+# ─── World Model Daemon Job Helpers (Requirement 18) ───────────────────────
+
+
+def _get_registered_projects() -> list[str]:
+    """Return list of registered project root paths from projects.json."""
+    projects_file = os.path.join(CORE_DIR, "projects.json")
+    try:
+        with open(projects_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return list(data.get("projects", {}).keys())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def _has_recent_file_modifications(project_root: str, within_minutes: int = 60) -> bool:
+    """Check if any file modifications occurred in the project within the given minutes.
+
+    Uses git log to check for recent commits. Falls back to checking file
+    mtimes in the project root if git is unavailable.
+    """
+    import subprocess as _sp
+
+    try:
+        result = _sp.run(
+            ["git", "log", "--oneline", f"--since={within_minutes} minutes ago", "--max-count=1"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Fallback: check mtime of files in project directory
+    cutoff = time.time() - (within_minutes * 60)
+    try:
+        for entry in os.scandir(project_root):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    return False
+
+
+def _get_current_git_head(project_root: str) -> str | None:
+    """Return the current git HEAD hash for a project, or None if unavailable."""
+    import subprocess as _sp
+
+    try:
+        result = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, OSError):
+        pass
+    return None
+
+
+def _run_wm_decay_tick(project_root: str, logger) -> bool:
+    """Execute a decay_tick job for the given project.
+
+    Loads world model, creates GraphMaintenanceEngine, runs decay_tick
+    with modified nodes from ChangeDetector, and saves results back.
+
+    Returns True on success, False on failure.
+    """
+    from .config import is_world_model_enabled, load_world_model
+
+    if not is_world_model_enabled(project_root):
+        return True  # Not enabled — consider success (no-op)
+
+    try:
+        store = load_world_model(project_root)
+        graph_data = store.load_graph()
+
+        from .models import Edge, Node
+        from .world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker, GraphMaintenanceEngine
+        from .observer import ChangeDetector
+
+        # Reconstruct graph from stored data
+        graph = DependencyGraph()
+        for node_dict in graph_data.get("nodes", []):
+            graph.add_node(Node.from_dict(node_dict))
+        for edge_dict in graph_data.get("edges", []):
+            graph.add_edge(Edge.from_dict(edge_dict))
+
+        # Load beliefs, contracts, gaps
+        beliefs = BeliefSystem()
+        contracts = ContractRegistry()
+        gaps = EpistemicGapTracker()
+
+        # Detect changes to find modified nodes
+        change_detector = ChangeDetector(project_root, store)
+        changes = change_detector.detect_changes()
+        modified_nodes = changes.get("modified_functions", [])
+
+        # Run decay tick
+        engine = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
+        engine.decay_tick(modified_nodes)
+
+        # Save graph back
+        nodes_out = [{"id": n.id, "node_type": n.node_type, "module": n.module,
+                      "file_path": n.file_path, "confidence": n.confidence,
+                      "tags": n.tags, "line_start": n.line_start,
+                      "line_end": n.line_end}
+                     for n in graph._nodes.values()]
+        edges_out = [{"id": e.id, "source": e.source, "target": e.target,
+                      "edge_type": e.edge_type, "confidence": e.confidence,
+                      "provenance": e.provenance, "conditional": e.conditional,
+                      "version": e.version}
+                     for e in graph._edges.values()]
+        store.save_graph({"nodes": nodes_out, "edges": edges_out})
+
+        logger.info("World model decay_tick completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("World model decay_tick failed for '%s': %s", project_root, e)
+        return False
+
+
+def _run_wm_static_analysis(project_root: str, logger) -> bool:
+    """Execute a static_analysis job for the given project.
+
+    Runs ChangeDetector.detect_changes() and if changes exist,
+    runs StaticAnalyzer on changed files.
+
+    Returns True on success, False on failure.
+    """
+    from .config import is_world_model_enabled, load_world_model
+
+    if not is_world_model_enabled(project_root):
+        return True  # Not enabled — consider success (no-op)
+
+    try:
+        store = load_world_model(project_root)
+
+        from .observer import ChangeDetector, StaticAnalyzer
+
+        change_detector = ChangeDetector(project_root, store)
+        changes = change_detector.detect_changes()
+
+        # If there are changes, run static analysis on affected files
+        added = changes.get("added_files", [])
+        modified_funcs = changes.get("modified_functions", [])
+
+        if added or modified_funcs:
+            analyzer = StaticAnalyzer(project_root, scope_config={"max_files": 1000})
+            # Analyze added files
+            for file_path in added:
+                abs_path = os.path.join(project_root, file_path)
+                if os.path.exists(abs_path) and abs_path.endswith(".py"):
+                    try:
+                        analyzer.analyze_file(abs_path)
+                    except Exception:
+                        pass  # Individual file failures are non-fatal
+
+        logger.info("World model static_analysis completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("World model static_analysis failed for '%s': %s", project_root, e)
+        return False
+
+
+def _run_wm_generate_goals(project_root: str, logger) -> bool:
+    """Execute a generate_goals job for the given project.
+
+    Creates GoalGenerator and calls generate_goals().
+
+    Returns True on success, False on failure.
+    """
+    from .config import is_world_model_enabled, load_world_model
+
+    if not is_world_model_enabled(project_root):
+        return True  # Not enabled — consider success (no-op)
+
+    try:
+        store = load_world_model(project_root)
+        graph_data = store.load_graph()
+
+        from .models import Edge, Node
+        from .world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker
+        from .goal_engine import GoalGenerator
+
+        # Reconstruct graph
+        graph = DependencyGraph()
+        for node_dict in graph_data.get("nodes", []):
+            graph.add_node(Node.from_dict(node_dict))
+        for edge_dict in graph_data.get("edges", []):
+            graph.add_edge(Edge.from_dict(edge_dict))
+
+        beliefs = BeliefSystem()
+        contracts = ContractRegistry()
+        gaps = EpistemicGapTracker()
+
+        generator = GoalGenerator(graph, contracts, gaps, beliefs, store)
+        generator.generate_goals()
+
+        logger.info("World model generate_goals completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("World model generate_goals failed for '%s': %s", project_root, e)
+        return False
+
+
+# ─── World Model Public API (Requirement 18) ──────────────────────────────
+
+
+# Job registry: maps project_root to set of registered job types
+_wm_job_registry: dict[str, set[str]] = {}
+
+
+def register_world_model_jobs(project_root: str) -> None:
+    """Register world model scheduled jobs for a project in the daemon's job registry.
+
+    Adds decay_tick, static_analysis, and generate_goals jobs for the given
+    project root. These jobs will be picked up by the daemon's main loop
+    scheduling logic.
+
+    Args:
+        project_root: Absolute path to the project root directory.
+    """
+    try:
+        _wm_job_registry[project_root] = {
+            WM_JOB_DECAY_TICK,
+            WM_JOB_STATIC_ANALYSIS,
+            WM_JOB_GENERATE_GOALS,
+        }
+    except Exception:
+        pass
+
+
+def execute_world_model_job(job_type: str, project_root: str) -> bool:
+    """Execute a world model maintenance job for a project.
+
+    Checks if world model is enabled, loads the store, and dispatches
+    to the appropriate handler based on job_type.
+
+    Args:
+        job_type: One of WM_JOB_DECAY_TICK, WM_JOB_STATIC_ANALYSIS, WM_JOB_GENERATE_GOALS.
+        project_root: Absolute path to the project root directory.
+
+    Returns:
+        True on success, False on failure.
+    """
+    from .config import is_world_model_enabled, load_world_model
+
+    logger = logging.getLogger("kognisant.daemon")
+
+    try:
+        if not is_world_model_enabled(project_root):
+            logger.info(
+                "World model not enabled for '%s', skipping %s",
+                project_root, job_type,
+            )
+            return False
+
+        store = load_world_model(project_root)
+
+        if job_type == WM_JOB_DECAY_TICK:
+            return _execute_wm_decay_tick(store, project_root, logger)
+        elif job_type == WM_JOB_STATIC_ANALYSIS:
+            return _execute_wm_static_analysis(store, project_root, logger)
+        elif job_type == WM_JOB_GENERATE_GOALS:
+            return _execute_wm_generate_goals(store, project_root, logger)
+        else:
+            logger.error("Unknown world model job type: %s", job_type)
+            return False
+    except Exception as e:
+        logger.error(
+            "World model job %s failed for '%s': %s",
+            job_type, project_root, e,
+        )
+        return False
+
+
+def _execute_wm_decay_tick(store, project_root: str, logger) -> bool:
+    """Execute decay_tick via store: load graph, run maintenance, save back."""
+    try:
+        graph_data = store.load_graph()
+
+        from .models import Edge, Node
+        from .world_model import (
+            BeliefSystem, ContractRegistry, DependencyGraph,
+            EpistemicGapTracker, GraphMaintenanceEngine,
+        )
+        from .observer import ChangeDetector
+
+        # Reconstruct graph from stored data
+        graph = DependencyGraph()
+        for node_dict in graph_data.get("nodes", []):
+            graph.add_node(Node.from_dict(node_dict))
+        for edge_dict in graph_data.get("edges", []):
+            graph.add_edge(Edge.from_dict(edge_dict))
+
+        # Load beliefs, contracts, gaps
+        beliefs = BeliefSystem()
+        contracts = ContractRegistry()
+        gaps = EpistemicGapTracker()
+
+        # Detect changes to find modified nodes
+        change_detector = ChangeDetector(project_root, store)
+        changes = change_detector.detect_changes()
+        modified_nodes = changes.get("modified_functions", [])
+
+        # Run decay tick
+        engine = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
+        engine.decay_tick(modified_nodes)
+
+        # Save graph back
+        nodes_out = [{"id": n.id, "node_type": n.node_type, "module": n.module,
+                      "file_path": n.file_path, "confidence": n.confidence,
+                      "tags": n.tags, "line_start": n.line_start,
+                      "line_end": n.line_end}
+                     for n in graph._nodes.values()]
+        edges_out = [{"id": e.id, "source": e.source, "target": e.target,
+                      "edge_type": e.edge_type, "confidence": e.confidence,
+                      "provenance": e.provenance, "conditional": e.conditional,
+                      "version": e.version}
+                     for e in graph._edges.values()]
+        store.save_graph({"nodes": nodes_out, "edges": edges_out})
+
+        logger.info("execute_world_model_job decay_tick completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("execute_world_model_job decay_tick failed for '%s': %s", project_root, e)
+        return False
+
+
+def _execute_wm_static_analysis(store, project_root: str, logger) -> bool:
+    """Execute static_analysis via store: detect changes, run analyzer."""
+    try:
+        from .observer import ChangeDetector, StaticAnalyzer
+
+        change_detector = ChangeDetector(project_root, store)
+        changes = change_detector.detect_changes()
+
+        added = changes.get("added_files", [])
+        modified_funcs = changes.get("modified_functions", [])
+
+        if added or modified_funcs:
+            analyzer = StaticAnalyzer(project_root, scope_config={"max_files": 1000})
+            for file_path in added:
+                abs_path = os.path.join(project_root, file_path)
+                if os.path.exists(abs_path) and abs_path.endswith(".py"):
+                    try:
+                        analyzer.analyze_file(abs_path)
+                    except Exception:
+                        pass  # Individual file failures are non-fatal
+
+        logger.info("execute_world_model_job static_analysis completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("execute_world_model_job static_analysis failed for '%s': %s", project_root, e)
+        return False
+
+
+def _execute_wm_generate_goals(store, project_root: str, logger) -> bool:
+    """Execute generate_goals via store: build graph, run goal generator."""
+    try:
+        graph_data = store.load_graph()
+
+        from .models import Edge, Node
+        from .world_model import (
+            BeliefSystem, ContractRegistry, DependencyGraph,
+            EpistemicGapTracker,
+        )
+        from .goal_engine import GoalGenerator
+
+        # Reconstruct graph
+        graph = DependencyGraph()
+        for node_dict in graph_data.get("nodes", []):
+            graph.add_node(Node.from_dict(node_dict))
+        for edge_dict in graph_data.get("edges", []):
+            graph.add_edge(Edge.from_dict(edge_dict))
+
+        beliefs = BeliefSystem()
+        contracts = ContractRegistry()
+        gaps = EpistemicGapTracker()
+
+        generator = GoalGenerator(graph, contracts, gaps, beliefs, store)
+        generator.generate_goals()
+
+        logger.info("execute_world_model_job generate_goals completed for '%s'", project_root)
+        return True
+    except Exception as e:
+        logger.error("execute_world_model_job generate_goals failed for '%s': %s", project_root, e)
+        return False
+
+
 def _main_loop():
     """Main daemon polling loop.
 
@@ -629,6 +1042,27 @@ def _main_loop():
     agent_threads: dict[str, threading.Thread] = {}
     # Track agent job start times: {job_name: float}
     agent_start_times: dict[str, float] = {}
+
+    # --- World Model job state (Requirement 18) ---
+    # Per-project tracking: {project_root: state_dict}
+    wm_state: dict[str, dict] = {}
+    # Initialize WM state for all registered projects
+    for _proj_root in _get_registered_projects():
+        wm_state[_proj_root] = {
+            "last_decay_tick": 0.0,       # monotonic time of last decay_tick
+            "last_git_poll": 0.0,         # monotonic time of last git HEAD poll
+            "last_git_head": None,        # last known git HEAD hash
+            "decay_tick_failures": 0,     # failure counter
+            "static_analysis_failures": 0,
+            "generate_goals_failures": 0,
+            "decay_tick_retry_at": None,  # monotonic time for retry (or None)
+            "static_analysis_retry_at": None,
+            "generate_goals_retry_at": None,
+            "decay_tick_failed": False,   # marked failed until next trigger
+            "static_analysis_failed": False,
+            "generate_goals_failed": False,
+        }
+    logger.info("World model jobs registered for %d project(s) (R18.1)", len(wm_state))
 
     # Clock jump detection (Requirement 11): use monotonic clock
     POLL_INTERVAL = 15  # seconds
@@ -1258,6 +1692,111 @@ def _main_loop():
             for name in list(running_persistent.keys()):
                 log_path = os.path.join(logs_dir, f"{name}.log")
                 _rotate_log_if_needed(log_path)
+
+            # --- (g) World Model scheduled jobs (Requirement 18) ---
+            current_mono = time.monotonic()
+            for proj_root, wm in wm_state.items():
+                # --- R18.5/R18.6: Handle retries for failed jobs ---
+                for job_key in ("decay_tick", "static_analysis", "generate_goals"):
+                    retry_at = wm.get(f"{job_key}_retry_at")
+                    if retry_at is not None and current_mono >= retry_at:
+                        wm[f"{job_key}_retry_at"] = None
+                        # Execute retry
+                        if job_key == "decay_tick":
+                            success = _run_wm_decay_tick(proj_root, logger)
+                        elif job_key == "static_analysis":
+                            success = _run_wm_static_analysis(proj_root, logger)
+                        else:
+                            success = _run_wm_generate_goals(proj_root, logger)
+
+                        if success:
+                            wm[f"{job_key}_failures"] = 0
+                            wm[f"{job_key}_failed"] = False
+                            logger.info(
+                                "World model %s retry succeeded for '%s'",
+                                job_key, proj_root,
+                            )
+                            # R18.4: trigger generate_goals after successful retry
+                            if job_key in ("decay_tick", "static_analysis"):
+                                goal_success = _run_wm_generate_goals(proj_root, logger)
+                                if not goal_success:
+                                    wm["generate_goals_failures"] += 1
+                                    wm["generate_goals_retry_at"] = current_mono + _WM_RETRY_DELAY
+                                    logger.error(
+                                        "World model generate_goals failed after %s retry for '%s'",
+                                        job_key, proj_root,
+                                    )
+                        else:
+                            # R18.6: Second failure — mark failed, skip until next trigger
+                            wm[f"{job_key}_failed"] = True
+                            logger.error(
+                                "World model %s retry failed for '%s', "
+                                "marking failed until next trigger (R18.6)",
+                                job_key, proj_root,
+                            )
+
+                # --- R18.2: decay_tick every 60 min when activity detected ---
+                if not wm["decay_tick_failed"]:
+                    time_since_decay = current_mono - wm["last_decay_tick"]
+                    if time_since_decay >= _WM_DECAY_TICK_INTERVAL:
+                        if _has_recent_file_modifications(proj_root, within_minutes=60):
+                            wm["last_decay_tick"] = current_mono
+                            success = _run_wm_decay_tick(proj_root, logger)
+                            if success:
+                                wm["decay_tick_failures"] = 0
+                                # R18.4: trigger generate_goals after successful decay_tick
+                                goal_success = _run_wm_generate_goals(proj_root, logger)
+                                if not goal_success:
+                                    wm["generate_goals_failures"] += 1
+                                    wm["generate_goals_retry_at"] = current_mono + _WM_RETRY_DELAY
+                                    logger.error(
+                                        "World model generate_goals failed after decay_tick for '%s'",
+                                        proj_root,
+                                    )
+                            else:
+                                # R18.5: first failure — log, increment, retry after 5 min
+                                wm["decay_tick_failures"] += 1
+                                wm["decay_tick_retry_at"] = current_mono + _WM_RETRY_DELAY
+                                logger.error(
+                                    "World model decay_tick failed for '%s', "
+                                    "scheduling retry in 5 min (R18.5)",
+                                    proj_root,
+                                )
+
+                # --- R18.3: static_analysis when git HEAD changes (poll every 5 min) ---
+                if not wm["static_analysis_failed"]:
+                    time_since_git_poll = current_mono - wm["last_git_poll"]
+                    if time_since_git_poll >= _WM_GIT_POLL_INTERVAL:
+                        wm["last_git_poll"] = current_mono
+                        current_head = _get_current_git_head(proj_root)
+                        if current_head is not None:
+                            if wm["last_git_head"] is None:
+                                # First poll — just record HEAD, don't run
+                                wm["last_git_head"] = current_head
+                            elif current_head != wm["last_git_head"]:
+                                # HEAD changed — run static_analysis
+                                wm["last_git_head"] = current_head
+                                success = _run_wm_static_analysis(proj_root, logger)
+                                if success:
+                                    wm["static_analysis_failures"] = 0
+                                    # R18.4: trigger generate_goals after successful static_analysis
+                                    goal_success = _run_wm_generate_goals(proj_root, logger)
+                                    if not goal_success:
+                                        wm["generate_goals_failures"] += 1
+                                        wm["generate_goals_retry_at"] = current_mono + _WM_RETRY_DELAY
+                                        logger.error(
+                                            "World model generate_goals failed after static_analysis for '%s'",
+                                            proj_root,
+                                        )
+                                else:
+                                    # R18.5: first failure — log, increment, retry after 5 min
+                                    wm["static_analysis_failures"] += 1
+                                    wm["static_analysis_retry_at"] = current_mono + _WM_RETRY_DELAY
+                                    logger.error(
+                                        "World model static_analysis failed for '%s', "
+                                        "scheduling retry in 5 min (R18.5)",
+                                        proj_root,
+                                    )
 
         except Exception as e:
             logger.error("Error in polling cycle: %s", e)

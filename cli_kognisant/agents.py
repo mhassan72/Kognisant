@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import sys
@@ -6,9 +7,12 @@ import threading
 import time
 
 from .colors import Colors, Spinner
-from .config import GLOBAL_CORE_DIR, load_spec_info
+from .config import GLOBAL_CORE_DIR, load_spec_info, is_world_model_enabled, load_world_model
 from .network import query_model_api, query_model_api_raw
+from .observer import TraceCollector
 from .tools import execute_tool, load_global_tools
+
+logger = logging.getLogger(__name__)
 
 # Device Capability Awareness: Cap local concurrency based on CPU counts to prevent system freezes
 CPU_COUNT = os.cpu_count() or 4
@@ -313,7 +317,9 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                                 )
                                 sys.stdout.flush()
                                 time.sleep(0.05)
+                            tool_start = time.time()
                             result = execute_tool(func_name, func_args, project_info)
+                            tool_duration_ms = int((time.time() - tool_start) * 1000)
                             sys.stdout.write(
                                 f"\r  {Colors.CYAN}✓ [Read]{Colors.RESET} {desc_display} ({Colors.GREEN}Done{Colors.RESET})\n"
                             )
@@ -326,7 +332,9 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                                 )
                                 sys.stdout.flush()
                                 time.sleep(0.05)
+                            tool_start = time.time()
                             result = execute_tool(func_name, func_args, project_info)
+                            tool_duration_ms = int((time.time() - tool_start) * 1000)
                             sys.stdout.write(
                                 f"\r  {Colors.YELLOW}✓ [Write]{Colors.RESET} {desc_display} ({Colors.GREEN}Done{Colors.RESET})\n"
                             )
@@ -336,7 +344,26 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                                 f"  🔧 Agent [{subtask_id}] Tool Call: {func_name}({func_args})"
                             )
                             sys.stdout.flush()
+                            tool_start = time.time()
                             result = execute_tool(func_name, func_args, project_info)
+                            tool_duration_ms = int((time.time() - tool_start) * 1000)
+
+                    # Trace: record tool call and file operations
+                    try:
+                        tc = project_info.get("_trace_collector") if project_info else None
+                        sid = project_info.get("_trace_session_id") if project_info else None
+                        if tc and sid:
+                            tool_success = not result.startswith("[Error")
+                            tc.record_tool_call(
+                                sid, func_name, func_args, result[:200], tool_success, tool_duration_ms
+                            )
+                            # Detect file read/write operations
+                            if func_name == "read_project_file":
+                                tc.record_file_op(sid, file_display, "read", len(result))
+                            elif func_name in ("edit_project_file", "create_project_file"):
+                                tc.record_file_op(sid, file_display, "write", len(result))
+                    except Exception:
+                        pass
 
                     messages.append(
                         {
@@ -393,6 +420,19 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
     # Compile a blank swarm summary to prevent unbound static checks
     swarm_summary = ""
 
+    # Trace: Initialize trace collector for this swarm session
+    trace_collector = None
+    trace_session_id = None
+    try:
+        if project_info and project_info.get("root"):
+            trace_collector = TraceCollector(project_info["root"])
+            trace_session_id = trace_collector.start_session(user_task[:500])
+            project_info["_trace_collector"] = trace_collector
+            project_info["_trace_session_id"] = trace_session_id
+    except Exception:
+        trace_collector = None
+        trace_session_id = None
+
     # Dynamic Capability Analysis
     if force_mock:
         planning_model = {"name": "mock", "provider": "Offline", "api_base_url": ""}
@@ -432,6 +472,12 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                             "\n     Swarm aborted. Please correct your specs and retry.\n"
                         )
                         sys.stdout.flush()
+                    # Trace: end session on spec validation failure
+                    try:
+                        if trace_collector and trace_session_id:
+                            trace_collector.end_session(trace_session_id, "failed")
+                    except Exception:
+                        pass
                     SwarmController.is_active = False
                     return
 
@@ -452,6 +498,12 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
     # 1. PLAN PHASE
     # ==========================================
     if SwarmController.stop_event.is_set():
+        # Trace: end session on user stop
+        try:
+            if trace_collector and trace_session_id:
+                trace_collector.end_session(trace_session_id, "cancelled")
+        except Exception:
+            pass
         SwarmController.is_active = False
         return
     SwarmController.resume_event.wait()
@@ -543,6 +595,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 ],
             }
         else:
+            plan_llm_start = time.time()
             plan_content = query_model_api(
                 planning_model["api_base_url"],
                 planning_model.get("api_key", ""),
@@ -550,6 +603,22 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 [{"role": "user", "content": plan_prompt}],
                 protocol=planning_model.get("protocol", "openai"),
             ).strip()
+            plan_llm_duration_ms = int((time.time() - plan_llm_start) * 1000)
+
+            # Trace: record planning LLM call
+            try:
+                if trace_collector and trace_session_id:
+                    prompt_tokens_est = len(plan_prompt) // 4
+                    completion_tokens_est = len(plan_content) // 4
+                    trace_collector.record_llm_call(
+                        trace_session_id,
+                        planning_model["name"],
+                        prompt_tokens_est,
+                        completion_tokens_est,
+                        plan_llm_duration_ms,
+                    )
+            except Exception:
+                pass
 
             if "xml" in plan_content:
                 pass
@@ -570,6 +639,12 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 f"  ❌ {Colors.RED}Planning Failed:{Colors.RESET} Could not generate strategic plan. Error: {e}"
             )
             sys.stdout.flush()
+        # Trace: end session on planning failure
+        try:
+            if trace_collector and trace_session_id:
+                trace_collector.end_session(trace_session_id, "failed")
+        except Exception:
+            pass
         SwarmController.is_active = False
         return
 
@@ -598,6 +673,12 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 f"  ⚠️  {Colors.YELLOW}No execution subtasks formulated. Ending pipeline.{Colors.RESET}\n"
             )
             sys.stdout.flush()
+        # Trace: end session when no subtasks
+        try:
+            if trace_collector and trace_session_id:
+                trace_collector.end_session(trace_session_id, "completed")
+        except Exception:
+            pass
         SwarmController.is_active = False
         return
 
@@ -709,6 +790,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     "adjustments": [],
                 }
             else:
+                reflect_llm_start = time.time()
                 reflection_content = query_model_api(
                     planning_model["api_base_url"],
                     planning_model.get("api_key", ""),
@@ -716,6 +798,22 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     [{"role": "user", "content": reflect_prompt}],
                     protocol=planning_model.get("protocol", "openai"),
                 ).strip()
+                reflect_llm_duration_ms = int((time.time() - reflect_llm_start) * 1000)
+
+                # Trace: record reflection LLM call
+                try:
+                    if trace_collector and trace_session_id:
+                        prompt_tokens_est = len(reflect_prompt) // 4
+                        completion_tokens_est = len(reflection_content) // 4
+                        trace_collector.record_llm_call(
+                            trace_session_id,
+                            planning_model["name"],
+                            prompt_tokens_est,
+                            completion_tokens_est,
+                            reflect_llm_duration_ms,
+                        )
+                except Exception:
+                    pass
 
                 if "```json" in reflection_content:
                     reflection_content = (
@@ -770,11 +868,23 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
     # 4. PERSIST PHASE (Self-modeling context)
     # ==========================================
     if SwarmController.stop_event.is_set():
+        # Trace: end session on user stop before persist
+        try:
+            if trace_collector and trace_session_id:
+                trace_collector.end_session(trace_session_id, "cancelled")
+        except Exception:
+            pass
         SwarmController.is_active = False
         return
     SwarmController.resume_event.wait()
 
     if not project_info:
+        # Trace: end session when no project_info
+        try:
+            if trace_collector and trace_session_id:
+                trace_collector.end_session(trace_session_id, "completed")
+        except Exception:
+            pass
         SwarmController.is_active = False
         return
 
@@ -807,6 +917,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 "}"
             )
         else:
+            persist_llm_start = time.time()
             persist_raw = query_model_api(
                 planning_model["api_base_url"],
                 planning_model.get("api_key", ""),
@@ -814,6 +925,22 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 [{"role": "user", "content": persist_prompt}],
                 protocol=planning_model.get("protocol", "openai"),
             )
+            persist_llm_duration_ms = int((time.time() - persist_llm_start) * 1000)
+
+            # Trace: record persistence LLM call
+            try:
+                if trace_collector and trace_session_id:
+                    prompt_tokens_est = len(persist_prompt) // 4
+                    completion_tokens_est = len(persist_raw) // 4 if persist_raw else 0
+                    trace_collector.record_llm_call(
+                        trace_session_id,
+                        planning_model["name"],
+                        prompt_tokens_est,
+                        completion_tokens_est,
+                        persist_llm_duration_ms,
+                    )
+            except Exception:
+                pass
 
         if not persist_raw:
             raise Exception("No response received from the Persistence Agent.")
@@ -853,6 +980,21 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     [{"role": "user", "content": mod_prompt}],
                     protocol=planning_model.get("protocol", "openai"),
                 ).strip()
+
+                # Trace: record context modification LLM call
+                try:
+                    if trace_collector and trace_session_id:
+                        mod_tokens_est = len(mod_prompt) // 4
+                        mod_completion_est = len(updated_context) // 4
+                        trace_collector.record_llm_call(
+                            trace_session_id,
+                            planning_model["name"],
+                            mod_tokens_est,
+                            mod_completion_est,
+                            0,
+                        )
+                except Exception:
+                    pass
 
                 if "```markdown" in updated_context:
                     updated_context = (
@@ -951,12 +1093,135 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
             )
             sys.stdout.flush()
 
+    # ==========================================
+    # 4b. PERSIST PHASE — World Model Integration
+    # ==========================================
+    # After existing PERSIST logic completes, reinforce world model edges
+    # based on traced file operations and check for new goals.
+    # Guarded by world_model_enabled config flag. Never interrupts PERP flow.
+    if project_info and is_world_model_enabled(project_info["root"]):
+        try:
+            store = load_world_model(project_info["root"])
+            graph_data = store.load_graph()
+
+            # Only proceed if graph has content (skip gracefully on first run)
+            if graph_data.get("nodes") or graph_data.get("edges"):
+                from .models import Node as NodeModel, Edge as EdgeModel
+                from .world_model import (
+                    DependencyGraph,
+                    BeliefSystem,
+                    ContractRegistry,
+                    EpistemicGapTracker,
+                    GraphMaintenanceEngine,
+                )
+                from .goal_engine import GoalGenerator
+
+                # Reconstruct in-memory graph from stored data
+                graph = DependencyGraph()
+                for node_dict in graph_data.get("nodes", []):
+                    try:
+                        graph.add_node(NodeModel.from_dict(node_dict))
+                    except (KeyError, TypeError):
+                        continue
+                for edge_dict in graph_data.get("edges", []):
+                    try:
+                        graph.add_edge(EdgeModel.from_dict(edge_dict))
+                    except (KeyError, TypeError):
+                        continue
+
+                # Load beliefs, contracts, gaps
+                beliefs = BeliefSystem()
+                for b_dict in store.load_beliefs():
+                    try:
+                        from .models import Belief
+                        beliefs.add_belief(Belief.from_dict(b_dict))
+                    except (KeyError, TypeError):
+                        continue
+
+                contracts = ContractRegistry()
+                for c_dict in store.load_contracts():
+                    try:
+                        from .models import Contract
+                        contracts.register_contract(Contract.from_dict(c_dict))
+                    except (KeyError, TypeError):
+                        continue
+
+                gaps = EpistemicGapTracker()
+                for g_dict in store.load_gaps():
+                    try:
+                        from .models import EpistemicGap
+                        gaps.record_gap(EpistemicGap.from_dict(g_dict))
+                    except (KeyError, TypeError):
+                        continue
+
+                # Extract traced edge ids: find edges connected to files touched in this session
+                traced_edge_ids = []
+                if trace_collector and trace_session_id:
+                    # Drain the queue to get up-to-date file operations
+                    trace_collector._drain_queue()
+                    with trace_collector._lock:
+                        session_record = trace_collector._sessions.get(trace_session_id)
+                        if session_record:
+                            # Collect file paths from buffer and record
+                            touched_files = set()
+                            # From already-applied file_operations
+                            for fop in session_record.file_operations:
+                                touched_files.add(fop.file_path)
+                            # From buffer (not yet applied)
+                            for trace_type, trace_item in trace_collector._buffers.get(trace_session_id, []):
+                                if trace_type == "file_op":
+                                    touched_files.add(trace_item.file_path)
+
+                            # Map touched files to graph edges
+                            # Find nodes in those files, then find edges connected to them
+                            touched_node_ids = set()
+                            for node in graph._nodes.values():
+                                if node.file_path in touched_files:
+                                    touched_node_ids.add(node.id)
+
+                            # Collect edge ids connected to touched nodes
+                            for node_id in touched_node_ids:
+                                for edge_id in graph._edges_from.get(node_id, set()):
+                                    traced_edge_ids.append(edge_id)
+                                for edge_id in graph._edges_to.get(node_id, set()):
+                                    traced_edge_ids.append(edge_id)
+
+                # Reinforce edges that were touched during this session
+                if traced_edge_ids:
+                    maintenance = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
+                    maintenance.reinforce_edges(traced_edge_ids)
+
+                # Generate new goals based on current world model state
+                generator = GoalGenerator(graph, contracts, gaps, beliefs, store)
+                generator.generate_goals()
+
+                # Save updated world model state
+                # Serialize graph back to dict format
+                save_graph_data = {
+                    "nodes": [n.to_dict() for n in graph._nodes.values()],
+                    "edges": [e.to_dict() for e in graph._edges.values()],
+                }
+                store.save_graph(save_graph_data)
+                store.save_beliefs([b.to_dict() for b in beliefs._beliefs.values()])
+                store.save_contracts([c.to_dict() for c in contracts._contracts.values()])
+
+        except Exception as e:
+            # Never interrupt PERP flow
+            logger.warning("World model integration skipped: %s", e)
+
     spinner.stop()
     with print_lock:
         print(
             f"\n  ✨ {Colors.BOLD}PERP Swarm Process Finished Successfully!{Colors.RESET}\n"
         )
         sys.stdout.flush()
+
+    # Trace: end session on successful completion
+    try:
+        if trace_collector and trace_session_id:
+            trace_collector.end_session(trace_session_id, "completed")
+    except Exception:
+        pass
 
     # Release global active flag
     SwarmController.is_active = False

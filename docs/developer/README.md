@@ -13,6 +13,7 @@ Technical documentation for Kognisant contributors and maintainers. These docume
 | [testing.md](testing.md) | Test structure, conftest.py fixtures, test categories, running tests, coverage areas, and guidelines for adding new tests |
 | [cli-reference.md](cli-reference.md) | Complete CLI command reference for daemon, job, and chat slash commands with flags, examples, and exit codes |
 | [cron-scheduling.md](cron-scheduling.md) | CronParser implementation, 5-field format, supported syntax, UTC evaluation, `can_match_within_days()`, `next_run()`, and clock jump handling |
+| [world-model.md](world-model.md) | World Model subsystem: observer layer, dependency graph, goal engine, priority ranking, graduated autonomy, and integration points |
 
 ## Quick Links
 

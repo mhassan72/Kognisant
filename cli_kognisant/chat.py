@@ -14,6 +14,7 @@ from .config import (
     get_compiled_models,
     get_default_model,
     get_project_info,
+    is_world_model_enabled,
     load_global_skills,
     load_project_context,
     load_project_memory_guidelines,
@@ -235,12 +236,22 @@ def process_slash_commands(
                     f"  Note: If the daemon is not running, restarted jobs\n"
                     f"  will remain pending until the daemon starts.\n"
                 ),
+                "goals": (
+                    f"  {Colors.BOLD}/goals [subcommand]{Colors.RESET}\n\n"
+                    f"  View and manage AI-generated goals for your project.\n\n"
+                    f"  Subcommands:\n"
+                    f"    /goals                List all active goals with priority\n"
+                    f"    /goals accept <id>    Accept a goal (integrates into workflow)\n"
+                    f"    /goals dismiss <id>   Dismiss a goal (hides from suggestions)\n\n"
+                    f"  Goals are generated from your project's world model\n"
+                    f"  and shown at session start. Requires world model to be enabled.\n"
+                ),
             }
 
             if help_topic in detailed_help:
                 print(f"\n{detailed_help[help_topic]}")
             else:
-                print(f"  {Colors.YELLOW}No detailed help for '{help_topic}'. Available: agent, spec, model, tool, read, paste, context, clear, daemon, jobs, job{Colors.RESET}\n")
+                print(f"  {Colors.YELLOW}No detailed help for '{help_topic}'. Available: agent, spec, model, tool, read, paste, context, clear, daemon, jobs, job, goals{Colors.RESET}\n")
             return True
 
         # Compact help overview
@@ -250,6 +261,7 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Power Tools{Colors.RESET}   /agent <task>  /spec  /tool")
         print(f"  {Colors.BOLD}Daemon{Colors.RESET}        /daemon status|start|stop|restart")
         print(f"  {Colors.BOLD}Jobs{Colors.RESET}          /jobs  /job stop|logs|restart|remove <name>")
+        print(f"  {Colors.BOLD}Goals{Colors.RESET}         /goals  /goals accept|dismiss <id>")
         print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
         print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
         print(f"  {Colors.YELLOW}Note:{Colors.RESET} Daemon & jobs require POSIX (Linux/macOS). Cron times are in UTC.")
@@ -440,6 +452,19 @@ def process_slash_commands(
             print(
                 f"{Colors.MAGENTA}[+] Loaded '{target_file}' into conversation context ({len(content)} chars).{Colors.RESET}\n"
             )
+
+            # Inline contextual suggestion for loaded file
+            if project_info and is_world_model_enabled(project_info["root"]):
+                try:
+                    from .goal_engine import ProposalInterface
+
+                    proposal = ProposalInterface(project_root=project_info["root"])
+                    suggestion = proposal.get_inline_suggestion(full_path)
+                    if suggestion:
+                        print(suggestion)
+                        print()
+                except Exception:
+                    pass
         except Exception as ex:
             print(f"{Colors.RED}[!] Error reading file: {ex}{Colors.RESET}\n")
         return True
@@ -1039,6 +1064,21 @@ def process_slash_commands(
             print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /daemon status|start|stop|restart{Colors.RESET}\n")
             return True
 
+    elif cmd == "/goals":
+        if project_info and is_world_model_enabled(project_info["root"]):
+            try:
+                from .goal_engine import ProposalInterface
+
+                proposal = ProposalInterface(project_root=project_info["root"])
+                parts = cleaned_input.split()[1:]  # get subcommand parts
+                output = proposal.handle_command(parts)
+                print(output)
+            except Exception as ex:
+                print(f"{Colors.RED}[!] Error processing goals: {ex}{Colors.RESET}\n")
+        else:
+            print("World model not enabled. Enable it in .kognisant/config.json")
+        return True
+
     return False
 
 
@@ -1141,6 +1181,19 @@ def run_api_chat(model_config, project_info=None):
     if project_info:
         messages.append(build_system_prompt(project_info))
         save_chat_session(project_info, messages, session_file)
+
+    # Display session-start goals if world model is enabled
+    if project_info and is_world_model_enabled(project_info["root"]):
+        try:
+            from .goal_engine import ProposalInterface
+
+            proposal = ProposalInterface(project_root=project_info["root"])
+            goals_display = proposal.display_session_start_goals()
+            if goals_display:
+                print(goals_display)
+                print()
+        except Exception:
+            pass  # Never break chat startup
 
     while True:
         try:

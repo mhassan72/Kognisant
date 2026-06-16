@@ -344,6 +344,18 @@ def init_global_core():
             with open(projects_file, "w", encoding="utf-8") as f:
                 json.dump({"projects": {}}, f, indent=2)
 
+        # Create autonomy_config.json if it doesn't exist
+        autonomy_config_file = os.path.join(GLOBAL_CORE_DIR, "autonomy_config.json")
+        if not os.path.exists(autonomy_config_file):
+            with open(autonomy_config_file, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2)
+
+        # Create goal_stats.json if it doesn't exist
+        goal_stats_file = os.path.join(GLOBAL_CORE_DIR, "goal_stats.json")
+        if not os.path.exists(goal_stats_file):
+            with open(goal_stats_file, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2)
+
         # Create nested models_pool.json default configuration matching user's rich schema
         pool_path = os.path.join(GLOBAL_CORE_DIR, "models_pool.json")
         if not os.path.exists(pool_path):
@@ -1305,3 +1317,98 @@ def save_chat_session(project_info, messages_or_history, session_file):
             file=sys.stderr,
         )
         return False
+
+
+# ───────────────────────────────────────────────────────────
+# World Model Configuration Helpers
+# ───────────────────────────────────────────────────────────
+
+
+def is_world_model_enabled(project_root: str) -> bool:
+    """Check whether the world model is enabled for a project.
+
+    Reads <project_root>/.kognisant/config.json and looks for the
+    "world_model_enabled" key. Returns False if the file is missing,
+    unreadable, or the key is absent.
+    """
+    config_path = os.path.join(project_root, ".kognisant", "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("world_model_enabled", False))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def load_autonomy_config() -> dict:
+    """Load the autonomy configuration from ~/.kognisant_core/autonomy_config.json.
+
+    Returns an empty dict if the file is missing or unreadable.
+    """
+    config_path = os.path.join(GLOBAL_CORE_DIR, "autonomy_config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_autonomy_config(config: dict) -> None:
+    """Save autonomy configuration atomically to ~/.kognisant_core/autonomy_config.json.
+
+    Uses a tmp file + os.rename pattern for atomic writes.
+    """
+    os.makedirs(GLOBAL_CORE_DIR, exist_ok=True)
+    config_path = os.path.join(GLOBAL_CORE_DIR, "autonomy_config.json")
+    tmp_path = config_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    os.rename(tmp_path, config_path)
+
+
+def init_world_model(project_root: str) -> None:
+    """Initialize the world model directory structure and empty JSON files.
+
+    Creates .kognisant/world_model/ with the required subdirectories and
+    initial empty JSON files for graph index, beliefs, contracts,
+    epistemic gaps, change log, and test health.
+    """
+    wm_dir = os.path.join(project_root, ".kognisant", "world_model")
+    graph_dir = os.path.join(wm_dir, "graph")
+    modules_dir = os.path.join(graph_dir, "modules")
+    snapshots_dir = os.path.join(wm_dir, "snapshots")
+
+    os.makedirs(modules_dir, exist_ok=True)
+    os.makedirs(snapshots_dir, exist_ok=True)
+
+    # Create initial empty JSON files if they don't already exist
+    initial_files = {
+        os.path.join(graph_dir, "index.json"): {},
+        os.path.join(wm_dir, "beliefs.json"): [],
+        os.path.join(wm_dir, "contracts.json"): [],
+        os.path.join(wm_dir, "epistemic_gaps.json"): [],
+        os.path.join(wm_dir, "change_log.json"): {},
+        os.path.join(wm_dir, "test_health.json"): [],
+    }
+
+    for filepath, default_content in initial_files.items():
+        if not os.path.exists(filepath):
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(default_content, f, indent=2)
+
+
+def load_world_model(project_root: str):
+    """Load and return a JsonWorldModelStore instance for the given project.
+
+    Args:
+        project_root: The root directory of the project.
+
+    Returns:
+        A JsonWorldModelStore instance.
+    """
+    from .world_model_store import JsonWorldModelStore
+
+    return JsonWorldModelStore(project_root)

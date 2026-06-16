@@ -414,6 +414,9 @@ Error: not_found - No log file found for job 'my-job'. Job may not have been exe
 | `/read <path>` | Load file into conversation context |
 | `/agent <task>` | Deploy autonomous PERP swarm |
 | `/tool <subcommand>` | Global tool management (list, register, delete) |
+| `/goals` | List active World Model goals (requires world_model_enabled) |
+| `/goals accept <id>` | Accept a goal for execution |
+| `/goals dismiss <id>` | Dismiss a goal (records negative feedback) |
 | `/paste` or `/p` | Enter paste mode (submit with `/end`) |
 | `exit` or `quit` | End session, save history |
 

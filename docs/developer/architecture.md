@@ -169,6 +169,47 @@ ANSI terminal rendering utilities:
 - Color palette constants
 - Terminal width detection
 
+### `models.py` - Data Models
+
+Shared dataclass definitions for the World Model subsystem:
+- `Node`, `Edge`, `Belief`, `Contract`, `EpistemicGap`, `Goal`
+- `TraceRecord`, `ToolCallTrace`, `FileOpTrace`, `LLMCallTrace`, `FeedbackSignal`
+- Utility functions: `clamp_confidence()`, `generate_uuid()`, `utc_now_iso()`
+- All dataclasses provide `to_dict()` and `from_dict(cls, d)` for JSON serialization
+
+### `observer.py` - Codebase Introspection
+
+Data collection and instrumentation layer:
+- `TraceCollector`: Thread-safe PERP execution tracing (queue-based cross-thread submission)
+- `StaticAnalyzer`: AST-based Python source analysis (function/class/import/call extraction, cyclomatic complexity)
+- `ChangeDetector`: Git diff integration for invalidating stale graph edges
+- `TestOutcomeTracker`: Pytest result recording, instability detection (3 consecutive failures), recovery detection
+
+### `world_model.py` - In-Memory Graph Operations
+
+Core graph logic and confidence management:
+- `DependencyGraph`: Dict-based adjacency storage with BFS queries, LRU caching (100 entries), merge logic, conditional edge marking
+- `BeliefSystem`: Provenance-based confidence (static=1.0, dynamic=0.8, llm_inference=0.5, user_assertion=0.9), reinforcement (+10% remaining), contradiction (-30%), localized decay
+- `ContractRegistry`: Implicit interface contracts with violation detection and event emission
+- `EpistemicGapTracker`: Tracks unexercised functions, untested branches, and nodes needing dynamic confirmation
+- `GraphMaintenanceEngine`: Localized decay with firebreaks (3-hop cap), cycle detection, stable edge exemption (30+ reinforcements), conflict resolution
+
+### `world_model_store.py` - Persistence Layer
+
+Storage abstraction for the World Model:
+- `WorldModelStore` (ABC): Load/save interface for graph, beliefs, contracts, gaps, snapshots
+- `JsonWorldModelStore`: Module-sharded JSON persistence, atomic writes (tmp + rename), shard size warnings (500KB), snapshot create/restore/delete with 2-hop subgraph capture, corrupted shard recovery
+
+### `goal_engine.py` - Goal Lifecycle
+
+Goal generation, ranking, execution, and learning:
+- `GoalGenerator`: Six detection strategies (contract_violation, coverage_gap, decay_alert, complexity, stale_artifact, pattern_detection), deduplication, self-validation
+- `PriorityRanker`: Score formula (impact_radius x severity_weight x likelihood / effort), effort bracket mapping (1-10 scale)
+- `LearningLoop`: Feedback signal recording, asymmetric weighting (negative=1.5x), rolling acceptance rates per type per module
+- `GraduatedAutonomyController`: Threshold-based autonomy levels (auto_execute >85%, suppress <20%, ask otherwise), cold start mode, unsuppression logic
+- `ProposalInterface`: Session-start display, /goals command handling, inline contextual suggestions, critical priority notifications
+- `ExecutionEngine`: Snapshot-based rollback, PERP task description building with causal chain, 10-minute timeout, edge reinforcement on success
+
 ## Data Flow
 
 ### Chat Turn Flow
@@ -296,3 +337,4 @@ ProcessManager.spawn(script_path, env, job_context, cwd):
 - [Job Lifecycle](job-lifecycle.md) - State machine and execution flows
 - [Security](security.md) - Symlink containment and permission model
 - [CLI Reference](cli-reference.md) - All commands and flags
+- [World Model](world-model.md) - Goal generation, dependency graph, and observer subsystem

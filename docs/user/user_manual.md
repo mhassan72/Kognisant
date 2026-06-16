@@ -23,6 +23,7 @@ This manual provides an exhaustive guide to installing, configuring, and interac
 14. [Security & Secrets](#14-security--secrets)
 15. [Cron Scheduling](#15-cron-scheduling)
 16. [Daemon & Background Jobs](#16-daemon--background-jobs)
+17. [World Model and Goal Generation](#17-world-model-and-goal-generation)
 
 ---
 
@@ -152,6 +153,9 @@ Kognisant provides an extensive suite of in-chat commands to inspect state, swit
 | `/agent` | `/agent <task>` | Spawns a concurrent, background **PERP Swarm** to solve a complex coding task. |
 | `/tool` | `/tool <subcommand>` | Opens the global tool management wizard (list, register, delete global tools). |
 | `/paste` / `/p` | `/paste` | Opens secure paste mode. Type `/end` on a blank line to submit large log traces. |
+| `/goals` | `/goals` | Lists active World Model improvement goals (requires world_model_enabled). |
+| `/goals accept` | `/goals accept <id>` | Accept a goal for automatic execution. |
+| `/goals dismiss` | `/goals dismiss <id>` | Dismiss a goal and record negative feedback for learning. |
 | `/jobs` | `/jobs` | Lists all background jobs with name, type, state, run count, exit code, next run, and PID. |
 | `/job stop` | `/job stop <name>` | Send SIGTERM to running subprocess, set state to "cancelled". |
 | `/job logs` | `/job logs <name>` | View last 30 lines of job output. |
@@ -780,6 +784,123 @@ This resets the restart counter and puts the job back in `pending` state.
 ├── skills/
 └── tools/
 ```
+
+---
+
+## 17. World Model and Goal Generation
+
+Kognisant includes a self-diagnostic subsystem called the World Model. When enabled, it maintains a dependency graph of your codebase, tracks confidence scores on its knowledge, and generates prioritized improvement goals automatically.
+
+### Enabling the World Model
+
+The World Model is disabled by default. To enable it for a project, add the `world_model_enabled` flag to your workspace config:
+
+```json
+// .kognisant/config.json
+{
+  "project_name": "my-project",
+  "world_model_enabled": true,
+  ...
+}
+```
+
+Then initialize the world model directory structure:
+
+```bash
+kognisant chat
+# Inside chat:
+/agent Initialize world model for this project
+```
+
+Or it will initialize automatically on the first PERP swarm run when enabled.
+
+### What the World Model Does
+
+When enabled, the World Model:
+
+1. **Traces PERP executions** - every tool call, file operation, and LLM call is recorded to `.kognisant/traces/`.
+2. **Builds a dependency graph** - AST-based static analysis maps functions, classes, imports, and call sites with confidence scores.
+3. **Detects changes** - git diff integration invalidates stale graph edges when code changes.
+4. **Tracks test health** - pytest pass/fail trends are recorded. Unstable tests reduce confidence on connected code.
+5. **Generates improvement goals** - six detection strategies identify contract violations, coverage gaps, complexity hotspots, stale artifacts, decay alerts, and repeated error patterns.
+6. **Learns from your feedback** - acceptance and dismissal signals calibrate future goal generation.
+
+### The /goals Command
+
+When the World Model is enabled, a new `/goals` command becomes available in chat:
+
+| Command | Description |
+| :--- | :--- |
+| `/goals` | List all active goals grouped by type with priority scores |
+| `/goals accept <id>` | Accept a goal and queue it for execution |
+| `/goals dismiss <id>` | Dismiss a goal (records negative feedback for learning) |
+
+### Session-Start Goal Display
+
+When you start a new chat session with the World Model enabled, Kognisant displays up to 3 top-priority active goals. This helps surface relevant improvements at the right time.
+
+### Inline Contextual Suggestions
+
+When you use `/read <file>` on a file that has associated active goals, Kognisant displays the highest-priority goal for that file as an inline suggestion.
+
+### Goal Types
+
+| Type | Trigger | What It Means |
+| :--- | :--- | :--- |
+| `contract_violation` | Function call arguments don't match expected signature | An interface contract between components may be broken |
+| `coverage_gap` | Module has 4+ untested branches | Test coverage is insufficient in a module |
+| `decay_alert` | Many beliefs pruned from a module in one cycle | Knowledge about a module is going stale |
+| `complexity` | Cyclomatic complexity > 15 with high churn or no tests | A function is too complex and risky |
+| `stale_artifact` | File unmodified 90+ days with low-confidence nodes | Code may be abandoned or outdated |
+| `pattern_detection` | Same error repeated 3+ times in recent executions | A recurring failure pattern exists |
+
+### Graduated Autonomy
+
+Kognisant learns which goal types you tend to accept or dismiss:
+
+- **Auto-execute** (acceptance rate > 85%) - goals are executed without asking
+- **Ask** (between 20% and 85%) - goals are proposed for your approval
+- **Suppress** (acceptance rate < 20%) - goals are hidden (periodically re-evaluated)
+
+During the first 20 proposals (cold start mode), all goals require explicit confirmation.
+
+### Daemon Integration
+
+When the daemon is running and the World Model is enabled, three background maintenance jobs execute automatically:
+
+- **decay_tick** - runs every 60 minutes when file modifications are detected. Applies localized confidence decay near changed code.
+- **static_analysis** - polls git HEAD every 5 minutes. When HEAD changes, re-analyzes affected files.
+- **generate_goals** - runs after successful decay_tick or static_analysis to check for new goals.
+
+### Storage Layout
+
+The World Model stores its data under `.kognisant/world_model/`:
+
+```
+.kognisant/
+├── traces/                    # PERP execution traces (one JSON per session)
+├── world_model/
+│   ├── graph/
+│   │   ├── index.json         # Node-to-shard mapping
+│   │   ├── modules/           # Per-module JSON shards
+│   │   └── cross_module.json  # Inter-module edges
+│   ├── beliefs.json           # Confidence-tracked knowledge
+│   ├── contracts.json         # Component interface contracts
+│   ├── epistemic_gaps.json    # Known unknowns
+│   ├── change_log.json        # Last known git HEAD
+│   ├── test_health.json       # Rolling test results (last 20 runs)
+│   └── snapshots/             # Pre-execution state snapshots
+└── goals/
+    ├── active.json            # Currently active goals
+    ├── completed.json         # Historical completed/failed goals
+    └── learning.json          # Feedback signals for autonomy calibration
+```
+
+Global autonomy configuration is stored at `~/.kognisant_core/autonomy_config.json`.
+
+### Backward Compatibility
+
+All World Model features are gated behind the `world_model_enabled` flag. Existing users who never set this flag will see zero changes in behavior. The TraceCollector records traces regardless (lightweight, no-op if traces directory is missing), but all graph operations, goal generation, and UI features only activate when explicitly enabled.
 
 ---
 *Kognisant is open-source and free-to-use under the MIT License. Share, modify, and build universal agentic intelligence freely!*

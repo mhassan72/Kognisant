@@ -871,44 +871,36 @@ class GoalGenerator:
         return False
 
     def _compute_complexity_for_node(self, node) -> int | None:
-        """Compute cyclomatic complexity for a function node using AST via subprocess.
+        """Compute cyclomatic complexity for a function node using StaticAnalyzer.
+
+        Uses the in-process AST-based complexity computation from observer.py
+        instead of spawning a subprocess per node.
 
         Returns the complexity value, or None if computation fails.
         """
         try:
-            # Use a simple Python subprocess to compute complexity
-            script = (
-                "import ast, sys\n"
-                "with open(sys.argv[1]) as f:\n"
-                "    tree = ast.parse(f.read())\n"
-                "target = sys.argv[2]\n"
-                "for node in ast.walk(tree):\n"
-                "    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == target:\n"
-                "        complexity = 1\n"
-                "        for child in ast.walk(node):\n"
-                "            if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler, ast.With, ast.Assert)):\n"
-                "                complexity += 1\n"
-                "            elif isinstance(child, ast.BoolOp):\n"
-                "                complexity += len(child.values) - 1\n"
-                "            elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):\n"
-                "                complexity += 1\n"
-                "        print(complexity)\n"
-                "        sys.exit(0)\n"
-                "print(1)\n"
-            )
+            from .observer import StaticAnalyzer
+
+            # Get the project root from the store
+            project_root = ""
+            if hasattr(self._store, '_project_root'):
+                project_root = self._store._project_root
+
+            # Build absolute file path
+            file_path = node.file_path
+            if project_root and not os.path.isabs(file_path):
+                file_path = os.path.join(project_root, file_path)
+
+            if not os.path.isfile(file_path):
+                return None
+
             # Extract function name from node_id (module.class.func or module.func)
             func_name = node.id.split(".")[-1]
-            result = subprocess.run(
-                ["python3", "-c", script, node.file_path, func_name],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return int(result.stdout.strip())
-        except (subprocess.TimeoutExpired, ValueError, OSError):
-            pass
-        return None
+
+            analyzer = StaticAnalyzer(project_root or ".", {"max_files": 1})
+            return analyzer.compute_complexity(file_path, func_name)
+        except Exception:
+            return None
 
     def _check_churn(self, file_path: str, node_id: str) -> bool:
         """Check if a file has 3+ modifications in the last 30 days via git log.
@@ -2072,10 +2064,34 @@ class ProposalInterface:
                 gaps = EpistemicGapTracker()
                 maintenance = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
 
-                # Create and run ExecutionEngine (stub mode - no perp_callback wired yet)
+                # Create perp_callback for PERP orchestration
+                def _perp_callback(task_description, project_info, compiled_models):
+                    """Execute goal via PERP orchestration."""
+                    from .agents import _orchestrate_worker, SwarmController
+                    from .config import get_compiled_models, get_project_info
+
+                    # Build project_info if not provided
+                    if not project_info:
+                        project_info = get_project_info(self._project_root)
+                    if not compiled_models:
+                        compiled_models = get_compiled_models()
+
+                    # Run orchestration synchronously on this thread
+                    SwarmController.stop_event.clear()
+                    SwarmController.resume_event.set()
+                    SwarmController.is_active = True
+                    try:
+                        _orchestrate_worker(task_description, project_info, compiled_models)
+                        return True
+                    except Exception:
+                        return False
+                    finally:
+                        SwarmController.is_active = False
+
                 engine = ExecutionEngine(
                     store=store,
                     graph=graph,
+                    perp_callback=_perp_callback,
                     maintenance_engine=maintenance,
                     project_root=self._project_root,
                 )

@@ -262,6 +262,7 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Daemon{Colors.RESET}        /daemon status|start|stop|restart")
         print(f"  {Colors.BOLD}Jobs{Colors.RESET}          /jobs  /job stop|logs|restart|remove <name>")
         print(f"  {Colors.BOLD}Goals{Colors.RESET}         /goals  /goals accept|dismiss <id>")
+        print(f"  {Colors.BOLD}World Model{Colors.RESET}   /worldmodel [enable|disable|status]")
         print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
         print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
         print(f"  {Colors.YELLOW}Note:{Colors.RESET} Daemon & jobs require POSIX (Linux/macOS). Cron times are in UTC.")
@@ -1063,6 +1064,50 @@ def process_slash_commands(
         else:
             print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /daemon status|start|stop|restart{Colors.RESET}\n")
             return True
+
+    elif cmd == "/worldmodel":
+        if project_info:
+            parts = cleaned_input.split()[1:]
+            subcommand = parts[0].lower() if parts else "status"
+            if subcommand == "enable":
+                try:
+                    config_path = os.path.join(project_info["root"], ".kognisant", "config.json")
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    config_data["world_model_enabled"] = True
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(config_data, f, indent=2)
+                    from .config import init_world_model
+                    init_world_model(project_info["root"])
+                    print(f"{Colors.GREEN}World model enabled and initialized.{Colors.RESET}")
+                except Exception as ex:
+                    print(f"{Colors.RED}[!] Error enabling world model: {ex}{Colors.RESET}")
+            elif subcommand == "disable":
+                try:
+                    config_path = os.path.join(project_info["root"], ".kognisant", "config.json")
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    config_data["world_model_enabled"] = False
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(config_data, f, indent=2)
+                    print(f"{Colors.GREEN}World model disabled.{Colors.RESET}")
+                except Exception as ex:
+                    print(f"{Colors.RED}[!] Error disabling world model: {ex}{Colors.RESET}")
+            elif subcommand == "status":
+                enabled = is_world_model_enabled(project_info["root"]) if project_info else False
+                status_str = f"{Colors.GREEN}enabled{Colors.RESET}" if enabled else f"{Colors.YELLOW}disabled{Colors.RESET}"
+                print(f"  World Model: {status_str}")
+                if enabled:
+                    wm_dir = os.path.join(project_info["root"], ".kognisant", "world_model")
+                    if os.path.isdir(wm_dir):
+                        print(f"  Storage: {wm_dir}")
+                    else:
+                        print(f"  Storage: {Colors.YELLOW}not initialized{Colors.RESET} (run /worldmodel enable)")
+            else:
+                print(f"  Usage: /worldmodel [enable|disable|status]")
+        else:
+            print("No project detected. Run 'kognisant init' first.")
+        return True
 
     elif cmd == "/goals":
         if project_info and is_world_model_enabled(project_info["root"]):

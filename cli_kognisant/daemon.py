@@ -707,6 +707,48 @@ def _run_wm_static_analysis(project_root: str, logger) -> bool:
                         pass  # Individual file failures are non-fatal
 
         logger.info("World model static_analysis completed for '%s'", project_root)
+
+        # Attempt to collect test results and feed to TestOutcomeTracker
+        try:
+            from .observer import TestOutcomeTracker
+            test_tracker = TestOutcomeTracker(project_root, store)
+
+            # Run pytest with coverage (best-effort, non-blocking)
+            test_result = subprocess.run(
+                ["python3", "-m", "pytest", "--tb=no", "-q", "--co", "-q"],
+                capture_output=True, text=True,
+                cwd=project_root, timeout=30,
+            )
+            # Only record if pytest is available and has results
+            if test_result.returncode in (0, 1):  # 0=all pass, 1=some fail
+                # Parse basic counts from pytest output
+                import re as _re
+                output = test_result.stdout.strip()
+                lines = output.splitlines()
+                last_line = lines[-1] if lines else ""
+                passed = failed = skipped = 0
+                m = _re.search(r'(\d+) passed', last_line)
+                if m: passed = int(m.group(1))
+                m = _re.search(r'(\d+) failed', last_line)
+                if m: failed = int(m.group(1))
+                m = _re.search(r'(\d+) skipped', last_line)
+                if m: skipped = int(m.group(1))
+                total = passed + failed + skipped
+
+                if total > 0:
+                    test_tracker.record_test_run({
+                        "total": total,
+                        "passed": passed,
+                        "failed": failed,
+                        "skipped": skipped,
+                        "duration_ms": 0,
+                        "failed_tests": [],
+                        "passed_tests": [],
+                        "coverage": None,
+                    })
+        except Exception:
+            pass  # Non-critical, never interrupt the main job
+
         return True
     except Exception as e:
         logger.error("World model static_analysis failed for '%s': %s", project_root, e)

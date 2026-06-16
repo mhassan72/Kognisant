@@ -420,6 +420,17 @@ Error: not_found - No log file found for job 'my-job'. Job may not have been exe
 | `/paste` or `/p` | Enter paste mode (submit with `/end`) |
 | `exit` or `quit` | End session, save history |
 
+### World Model Commands
+
+| Command | Description |
+|---------|-------------|
+| `/worldmodel` | Show World Model status (enabled/disabled, storage path) |
+| `/worldmodel enable` | Enable World Model and initialize .kognisant/world_model/ directory |
+| `/worldmodel disable` | Disable World Model (preserves existing data) |
+| `/goals` | List all active goals grouped by type with priority scores |
+| `/goals accept <id>` | Accept goal, dispatch to PERP ExecutionEngine |
+| `/goals dismiss <id>` | Dismiss goal, record negative feedback in LearningLoop |
+
 ### Job Command Details
 
 **`/job stop <name>`**

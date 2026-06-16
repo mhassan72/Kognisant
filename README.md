@@ -29,6 +29,10 @@ When Kognisant encounters a task it can't handle with its built-in toolkit, it c
 
 A production-hardened background daemon runs scripts, cron jobs, monitoring tasks, and AI agent work autonomously. Crash recovery, atomic writes, and schema versioning keep it reliable. Schedule a nightly test suite, a persistent bot, or a one-shot AI research task. Kognisant executes it without an open terminal.
 
+### It understands your codebase
+
+The World Model builds a living dependency graph of your project. It tracks function calls, imports, class hierarchies, and test outcomes with confidence scores. When code changes, it detects what went stale. When patterns break, it suggests fixes. When coverage gaps grow, it flags them. The system learns from your responses (accept or dismiss) and calibrates its suggestions over time, graduating from "ask every time" to "handle it automatically" as trust builds.
+
 ### It's not just for code
 
 Web search, headless page browsing, browser console capture, desktop browser control. Kognisant's toolkit makes it useful for research, documentation, planning, and general knowledge work. The PERP agent (Plan > Execute > Reflect > Persist) can break down and complete any structured task, not just programming.
@@ -48,6 +52,7 @@ Built entirely on the Python 3.10+ standard library. No bloated dependency tree.
 - [Self-Building Tools & Skills](#self-building-tools--skills)
 - [Autonomous Agent (PERP Swarm)](#autonomous-agent-perp-swarm)
 - [Background Daemon & Job Scheduling](#background-daemon--job-scheduling)
+- [World Model](#world-model)
 - [Slash Commands](#slash-commands)
 - [Built-in Toolkit](#built-in-toolkit)
 - [Project Structure](#project-structure)
@@ -300,6 +305,84 @@ kognisant job remove <name>
 
 ---
 
+## World Model
+
+The World Model is an opt-in subsystem that gives Kognisant deep understanding of your codebase structure and health.
+
+### Enable It
+
+```bash
+# From chat:
+/worldmodel enable
+
+# Or manually in .kognisant/config.json:
+{"world_model_enabled": true}
+```
+
+### What It Does
+
+When enabled, the World Model:
+
+- **Traces every PERP execution** (tool calls, file ops, LLM calls) for observability
+- **Builds a dependency graph** via AST analysis (functions, classes, imports, call sites)
+- **Tracks confidence scores** on every piece of knowledge, with provenance (static analysis, dynamic trace, LLM inference, or user assertion)
+- **Detects code changes** via git and invalidates stale graph edges automatically
+- **Monitors test health** (rolling history, instability detection, recovery tracking)
+- **Generates improvement goals** from 6 strategies: contract violations, coverage gaps, decay alerts, complexity hotspots, stale artifacts, and repeated error patterns
+- **Ranks goals by priority** using impact radius, severity, likelihood, and effort estimation
+- **Learns from your feedback** to calibrate future suggestions (accept rate tracking with asymmetric weighting)
+- **Graduates autonomy** from "ask every time" to "auto-execute" as acceptance rates cross thresholds
+
+### Goal Types
+
+| Type | What It Detects |
+|------|----------------|
+| Contract Violation | Function call arguments don't match expected signature |
+| Coverage Gap | Module has 4+ untested branches |
+| Decay Alert | Knowledge about a module is going stale (many beliefs pruned) |
+| Complexity | Function too complex (cyclomatic > 15) with high churn or no tests |
+| Stale Artifact | File unmodified 90+ days with low-confidence nodes |
+| Pattern Detection | Same error repeated 3+ times in recent executions |
+
+### Commands
+
+```bash
+/worldmodel enable       # Enable and initialize
+/worldmodel disable      # Disable (preserves data)
+/worldmodel status       # Check current state
+
+/goals                   # List all active goals
+/goals accept <id>       # Accept and execute via PERP
+/goals dismiss <id>      # Dismiss (trains the learning loop)
+```
+
+### Background Maintenance
+
+When the daemon is running, three maintenance jobs execute automatically:
+- **Decay tick** (every 60 min) reduces confidence near changed code
+- **Static analysis** (on git HEAD change) refreshes the dependency graph
+- **Goal generation** (after each maintenance pass) checks for new issues
+
+### Storage
+
+```
+.kognisant/
+├── traces/                    # PERP execution traces
+├── world_model/
+│   ├── graph/                 # Dependency graph (sharded by module)
+│   ├── beliefs.json           # Confidence-tracked knowledge
+│   ├── contracts.json         # Interface contracts
+│   ├── epistemic_gaps.json    # Known unknowns
+│   ├── test_health.json       # Test pass/fail trends
+│   └── snapshots/             # Pre-execution rollback points
+└── goals/
+    ├── active.json            # Current goals
+    ├── completed.json         # Historical goals
+    └── learning.json          # Feedback signals
+```
+
+---
+
 ## Slash Commands
 
 Available during `kognisant chat`:
@@ -313,6 +396,9 @@ Available during `kognisant chat`:
 | `/model` | Switch model or add a new endpoint |
 | `/providers` | Inspect configured providers and API key status |
 | `/files` | List workspace files |
+| `/goals` | List active World Model improvement goals |
+| `/goals accept <id>` | Accept a goal for automatic PERP execution |
+| `/goals dismiss <id>` | Dismiss a goal (records feedback for learning) |
 | `/read <path>` | Load a file into conversation context |
 | `/agent <task>` | Dispatch the PERP swarm |
 | `/daemon stop` | Stop the background daemon |
@@ -320,6 +406,9 @@ Available during `kognisant chat`:
 | `/job stop` | Stop a running job |
 | `/job remove` | Remove a job |
 | `/job restart` | Restart a job |
+| `/worldmodel` | Check World Model status (enabled/disabled) |
+| `/worldmodel enable` | Enable the World Model and initialize storage |
+| `/worldmodel disable` | Disable the World Model |
 
 ---
 
@@ -376,6 +465,11 @@ cli-kognisant/
 │   ├── agents.py                  # PERP swarm orchestration
 │   ├── network.py                 # API client with retry & backoff
 │   ├── tools.py                   # Tool specs & execution sandbox
+│   ├── models.py                  # Shared dataclasses (Node, Edge, Goal, etc.)
+│   ├── observer.py                # Trace collection, static analysis, git change detection
+│   ├── world_model.py             # Dependency graph, beliefs, contracts, maintenance
+│   ├── world_model_store.py       # JSON-sharded persistence with snapshots
+│   ├── goal_engine.py             # Goal generation, ranking, execution, learning
 │   ├── daemon.py                  # Background daemon engine
 │   ├── jobs.py                    # Job queue, cron parser, atomic writes
 │   ├── scripts.py                 # Script CRUD with symlink containment
@@ -421,6 +515,7 @@ In-depth technical documentation lives in [`docs/developer/`](docs/developer/):
 - [Testing](docs/developer/testing.md) - Test structure, fixtures, coverage strategy
 - [CLI Reference](docs/developer/cli-reference.md) - Complete command reference with flags and exit codes
 - [Cron Scheduling](docs/developer/cron-scheduling.md) - Parser internals, UTC evaluation, clock jump handling
+- [World Model](docs/developer/world-model.md) - Dependency graph, goal engine, observer, graduated autonomy
 
 ---
 

@@ -165,6 +165,7 @@ Kognisant provides an extensive suite of in-chat commands to inspect state, swit
 | `/daemon start` | `/daemon start` | Start the background daemon process. |
 | `/daemon stop` | `/daemon stop` | Stop the running daemon (sends SIGTERM). |
 | `/daemon restart` | `/daemon restart` | Stop and restart the daemon in one step. |
+| `/worldmodel` | `/worldmodel [enable\|disable\|status]` | Manage the World Model subsystem (enable, disable, or check status). |
 | `/clear` | `/clear` | Flushes active session conversational logs, starting fresh while preserving system prompts. |
 | `exit` / `quit` | `exit` | Safely terminates your session, saves logs to `.kognisant/history/`, and exits. |
 

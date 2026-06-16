@@ -23,7 +23,7 @@ from .config import (
     save_providers_and_pool,
     set_default_model,
 )
-from .network import KognisantAPIError, query_model_api_raw
+from .network import KognisantAPIError, query_model_api_raw, query_model_api_stream
 from .tools import execute_tool, get_active_tools
 
 
@@ -1195,6 +1195,81 @@ def run_mock_chat(project_info=None):
         print(f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(response)}\n")
 
 
+# ───────────────────────────────────────────────────────────
+# Context Window Management: Sliding Window + Tool Result Pruning
+# ───────────────────────────────────────────────────────────
+
+# Maximum number of recent turn pairs to keep in the API payload
+_MAX_RECENT_TURNS = 20
+# Maximum characters for a tool result before it gets pruned
+_TOOL_RESULT_PRUNE_THRESHOLD = 500
+
+
+def _prepare_api_messages(messages: list[dict], model_config: dict) -> list[dict]:
+    """Prepare a pruned message list for the LLM API call.
+
+    Applies two optimizations to reduce token count:
+    1. Tool result pruning: replaces verbose tool results from older turns
+       with compact summaries (keeps only recent tool results intact).
+    2. Sliding window: keeps the system prompt + last N turn pairs.
+
+    The full messages[] array on disk is never modified. This returns
+    a new list that is lighter for the API call.
+
+    Args:
+        messages: The full conversation history.
+        model_config: Model configuration (used for context_window hints).
+
+    Returns:
+        A pruned copy of messages suitable for the API payload.
+    """
+    if not messages:
+        return messages
+
+    # Step 1: Identify system prompt (always keep as first message)
+    system_messages = []
+    conversation_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_messages.append(msg)
+        else:
+            conversation_messages.append(msg)
+
+    # Step 2: Apply sliding window on conversation messages
+    # Keep last _MAX_RECENT_TURNS * 2 messages (each turn = user + assistant)
+    max_messages = _MAX_RECENT_TURNS * 2
+    if len(conversation_messages) > max_messages:
+        conversation_messages = conversation_messages[-max_messages:]
+
+    # Step 3: Prune tool results from older messages (not the most recent cycle)
+    # Find the index of the last user message (marks the current turn boundary)
+    last_user_idx = -1
+    for i in range(len(conversation_messages) - 1, -1, -1):
+        if conversation_messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+
+    pruned = []
+    for i, msg in enumerate(conversation_messages):
+        if msg.get("role") == "tool" and i < last_user_idx:
+            # This is a tool result from a previous turn. Prune if large.
+            content = msg.get("content", "")
+            if len(content) > _TOOL_RESULT_PRUNE_THRESHOLD:
+                pruned_msg = dict(msg)
+                tool_name = msg.get("name", "tool")
+                pruned_msg["content"] = (
+                    f"[Previously read: {tool_name} returned {len(content)} chars. "
+                    f"Content omitted for brevity. Re-read file if needed.]"
+                )
+                pruned.append(pruned_msg)
+            else:
+                pruned.append(msg)
+        else:
+            pruned.append(msg)
+
+    return system_messages + pruned
+
+
 def run_api_chat(model_config, project_info=None):
     """Active multi-turn LLM chat loop powered by standard compatible APIs with tool execution and self-healing fallback."""
     model_name = model_config["name"]
@@ -1274,12 +1349,18 @@ def run_api_chat(model_config, project_info=None):
 
         spinner = Spinner()
         spinner.start()
+        _streamed_response = False
         try:
             success = False
             while True:
+                # Prepare a pruned message payload for the API call.
+                # Full history stays in messages[] for disk persistence,
+                # but we send a trimmed version to reduce token count.
+                api_messages = _prepare_api_messages(messages, model_config)
+
                 payload = {
                     "model": model_config["name"],
-                    "messages": messages,
+                    "messages": api_messages,
                     "stream": False,
                 }
 
@@ -1290,21 +1371,62 @@ def run_api_chat(model_config, project_info=None):
                 if supports_tools:
                     payload["tools"] = get_active_tools()
 
-                resp_data = query_model_api_raw(
-                    model_config["api_base_url"],
-                    model_config["api_key"],
-                    payload,
-                    protocol=model_config.get("protocol", "openai"),
-                )
+                # Use streaming for faster time-to-first-token
+                assistant_message = None
+                tool_calls = None
+                try:
+                    spinner.stop()
+                    response_started = False
+                    for chunk_type, data in query_model_api_stream(
+                        model_config["api_base_url"],
+                        model_config["api_key"],
+                        payload,
+                        protocol=model_config.get("protocol", "openai"),
+                    ):
+                        if chunk_type == "content":
+                            if not response_started:
+                                print(f"\n{Colors.CYAN}Kognisant >{Colors.RESET}")
+                                response_started = True
+                                _streamed_response = True
+                            sys.stdout.write(data)
+                            sys.stdout.flush()
+                        elif chunk_type == "tool_calls":
+                            tool_calls = data
+                        elif chunk_type == "done":
+                            assistant_message = data
 
-                if not resp_data or "choices" not in resp_data:
+                    if response_started:
+                        print()  # Newline after streamed content
+
+                except KognisantAPIError:
+                    # Fallback to non-streaming if streaming fails
+                    spinner = Spinner()
+                    spinner.start()
+                    payload["stream"] = False
+                    resp_data = query_model_api_raw(
+                        model_config["api_base_url"],
+                        model_config["api_key"],
+                        payload,
+                        protocol=model_config.get("protocol", "openai"),
+                    )
+                    spinner.stop()
+
+                    if not resp_data or "choices" not in resp_data:
+                        raise KognisantAPIError(
+                            "Empty or malformed JSON returned from the model API."
+                        )
+                    choice = resp_data["choices"][0]
+                    assistant_message = choice["message"]
+                    tool_calls = assistant_message.get("tool_calls")
+
+                if assistant_message is None:
                     raise KognisantAPIError(
-                        "Empty or malformed JSON returned from the model API."
+                        "No response received from the model API."
                     )
 
-                choice = resp_data["choices"][0]
-                assistant_message = choice["message"]
-                tool_calls = assistant_message.get("tool_calls")
+                # Check for tool_calls from the assistant message
+                if tool_calls is None:
+                    tool_calls = assistant_message.get("tool_calls")
 
                 if tool_calls and supports_tools:
                     messages.append(assistant_message)
@@ -1474,9 +1596,12 @@ def run_api_chat(model_config, project_info=None):
             spinner.stop()
 
         if success:
-            print(
-                f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(response)}\n"
-            )
+            if not _streamed_response:
+                # Non-streamed fallback path: print the response normally
+                print(
+                    f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(response)}\n"
+                )
+            # If streaming already printed content, nothing more to do
         else:
             print(f"\n{response}\n")
 

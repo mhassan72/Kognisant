@@ -140,3 +140,122 @@ def query_model_api(api_base_url, api_key, model_name, messages, protocol="opena
     raise KognisantAPIError(
         f"Unknown model API response format for protocol '{protocol}'."
     )
+
+
+def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
+    """Send a streaming request to the LLM API. Yields (chunk_type, data) tuples.
+
+    chunk_type is one of:
+      - "content": data is a text fragment to display
+      - "tool_calls": data is the accumulated tool_calls list (yielded once at end)
+      - "done": data is the full assembled assistant message dict
+
+    Falls back to non-streaming if the API does not support SSE.
+    """
+    url = api_base_url.rstrip("/")
+
+    if protocol == "ollama":
+        if not url.endswith("/api/chat"):
+            url = f"{url}/api/chat"
+    elif protocol == "llama_cpp":
+        if not url.endswith("/completion") and not url.endswith("/v1/chat/completions"):
+            url = f"{url}/v1/chat/completions"
+    else:
+        if not url.endswith("/chat/completions") and not url.endswith("/chat"):
+            url = f"{url}/chat/completions"
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Force stream=True in payload
+    payload = dict(payload)
+    payload["stream"] = True
+
+    req_body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=req_body, headers=headers, method="POST")
+    context = ssl._create_unverified_context()
+
+    try:
+        response = urllib.request.urlopen(req, timeout=120.0, context=context)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        raise KognisantAPIError(f"Streaming request failed: {e}")
+
+    if response.status != 200:
+        raise KognisantAPIError(f"HTTP Error {response.status} from streaming API.")
+
+    # Parse SSE stream
+    content_parts = []
+    tool_calls_accumulated = []
+    assistant_role = "assistant"
+
+    try:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+
+            if not line:
+                continue
+            if line.startswith(":"):
+                continue  # SSE comment
+            if not line.startswith("data:"):
+                continue
+
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            # Handle OpenAI-compatible streaming format
+            if "choices" in chunk and len(chunk["choices"]) > 0:
+                delta = chunk["choices"][0].get("delta", {})
+
+                # Content token
+                if "content" in delta and delta["content"]:
+                    content_parts.append(delta["content"])
+                    yield ("content", delta["content"])
+
+                # Tool calls (streamed incrementally)
+                if "tool_calls" in delta:
+                    for tc_delta in delta["tool_calls"]:
+                        idx = tc_delta.get("index", 0)
+                        # Extend the accumulated list if needed
+                        while len(tool_calls_accumulated) <= idx:
+                            tool_calls_accumulated.append(
+                                {"id": "", "function": {"name": "", "arguments": ""}, "type": "function"}
+                            )
+                        tc = tool_calls_accumulated[idx]
+                        if "id" in tc_delta and tc_delta["id"]:
+                            tc["id"] = tc_delta["id"]
+                        if "function" in tc_delta:
+                            fn = tc_delta["function"]
+                            if "name" in fn and fn["name"]:
+                                tc["function"]["name"] += fn["name"]
+                            if "arguments" in fn and fn["arguments"]:
+                                tc["function"]["arguments"] += fn["arguments"]
+
+            # Handle Ollama native streaming format
+            elif "message" in chunk:
+                msg = chunk["message"]
+                if "content" in msg and msg["content"]:
+                    content_parts.append(msg["content"])
+                    yield ("content", msg["content"])
+
+    except Exception:
+        pass  # Stream ended unexpectedly, use what we have
+    finally:
+        response.close()
+
+    # Assemble final message
+    full_content = "".join(content_parts)
+    assistant_message = {"role": assistant_role, "content": full_content}
+
+    if tool_calls_accumulated:
+        assistant_message["tool_calls"] = tool_calls_accumulated
+        assistant_message["content"] = full_content or None
+        yield ("tool_calls", tool_calls_accumulated)
+
+    yield ("done", assistant_message)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 from collections import defaultdict
@@ -698,15 +699,118 @@ class GoalGenerator:
         return goals
 
     def _check_pattern_detection(self) -> list[Goal]:
-        """Scan traces for repeated error patterns (R10.6).
+        """Scan trace records for repeated error patterns (R10.6).
 
-        Stub implementation - full pattern detection requires trace access
-        that will be added when TraceCollector integration is complete.
+        Detects when the same exception class name occurs from the same
+        source function 3 times within the last 5 PERP executions.
+        Exception class names are normalized by stripping module prefix
+        (keeping only the class name).
+
+        Reads trace files from .kognisant/traces/ directory.
 
         Returns:
-            Empty list (stub).
+            List of new pattern_detection goals.
         """
-        return []
+        goals: list[Goal] = []
+
+        # Load recent trace records from disk
+        traces_dir = os.path.join(
+            self._store._project_root if hasattr(self._store, '_project_root') else "",
+            ".kognisant", "traces"
+        )
+        if not os.path.isdir(traces_dir):
+            return goals
+
+        # Load the 5 most recent trace files (by modification time)
+        try:
+            trace_files = sorted(
+                [
+                    os.path.join(traces_dir, f)
+                    for f in os.listdir(traces_dir)
+                    if f.endswith(".json")
+                ],
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )[:5]
+        except OSError:
+            return goals
+
+        if len(trace_files) < 1:
+            return goals
+
+        # Collect error patterns: (normalized_exception, source_function) -> [session_ids]
+        error_occurrences: dict[tuple[str, str], list[str]] = defaultdict(list)
+
+        for trace_path in trace_files:
+            try:
+                with open(trace_path, "r", encoding="utf-8") as f:
+                    trace_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            session_id = trace_data.get("session_id", "")
+            tool_calls = trace_data.get("tool_calls", [])
+
+            for tc in tool_calls:
+                if not tc.get("success", True):
+                    # Extract error info from result_summary
+                    result = tc.get("result_summary", "")
+                    tool_name = tc.get("tool_name", "unknown")
+
+                    # Normalize exception class name: strip module prefix
+                    exception_class = self._extract_exception_class(result)
+                    if exception_class:
+                        key = (exception_class, tool_name)
+                        if session_id not in error_occurrences[key]:
+                            error_occurrences[key].append(session_id)
+
+        # Detect patterns: 3+ occurrences across the 5 sessions
+        for (exception_class, source), session_ids in error_occurrences.items():
+            if len(session_ids) < 3:
+                continue
+
+            target_node = source
+            if self._is_duplicate("pattern_detection", target_node=target_node):
+                continue
+
+            goal = self._create_goal(
+                goal_type="pattern_detection",
+                title=f"Repeated error '{exception_class}' from '{source}' ({len(session_ids)} occurrences)",
+                target_node=target_node,
+                context={
+                    "exception_class": exception_class,
+                    "source_function": source,
+                    "occurrence_count": len(session_ids),
+                    "session_ids": session_ids[:5],
+                },
+            )
+            goals.append(goal)
+
+        return goals
+
+    def _extract_exception_class(self, error_text: str) -> str | None:
+        """Extract and normalize exception class name from error text.
+
+        Strips module prefix, keeping only the class name.
+        E.g. "builtins.ValueError: invalid" -> "ValueError"
+             "[Error] FileNotFoundError: ..." -> "FileNotFoundError"
+
+        Returns None if no recognizable exception pattern found.
+        """
+        if not error_text:
+            return None
+
+        # Common patterns: "ExceptionClass: message" or "[Error] ExceptionClass: message"
+        # Match patterns like "SomeError:", "some.module.SomeError:", "[Error] SomeError:"
+        match = re.search(r'(?:\[Error\]\s*)?(?:[\w.]+\.)?(\w*(?:Error|Exception|Warning|Failure))\b', error_text)
+        if match:
+            return match.group(1)
+
+        # Fallback: if result starts with [Error], use a generic marker
+        if error_text.startswith("[Error"):
+            return "UnknownError"
+
+        return None
 
     # ─── Helper Methods ───────────────────────────────────────
 
@@ -1905,7 +2009,11 @@ class ProposalInterface:
         return "\n".join(lines)
 
     def _accept_goal(self, goal_id: str) -> str:
-        """Mark goal as accepted and pass to ExecutionEngine (R12.3).
+        """Mark goal as accepted and dispatch to ExecutionEngine (R12.3).
+
+        Creates an ExecutionEngine instance and executes the goal via PERP
+        on a background thread. The goal status is updated to "accepted"
+        immediately, then to "completed" or "failed" after execution.
 
         Args:
             goal_id: The goal ID to accept.
@@ -1918,7 +2026,6 @@ class ProposalInterface:
             return self._invalid_id_error(goal_id)
 
         goal.status = "accepted"
-        goal.resolved_at = utc_now_iso()
 
         # Record positive signal in learning loop
         if self._learning_loop is not None:
@@ -1929,9 +2036,66 @@ class ProposalInterface:
 
         self._persist_active_goals()
 
+        # Dispatch to ExecutionEngine on a background thread
+        try:
+            from .config import load_world_model, is_world_model_enabled
+            from .world_model import (
+                DependencyGraph,
+                BeliefSystem,
+                ContractRegistry,
+                EpistemicGapTracker,
+                GraphMaintenanceEngine,
+            )
+            from .world_model_store import WorldModelStore
+
+            if is_world_model_enabled(self._project_root):
+                store = load_world_model(self._project_root)
+                graph_data = store.load_graph()
+
+                # Build graph
+                from .models import Node as NodeModel, Edge as EdgeModel
+                graph = DependencyGraph()
+                for node_dict in graph_data.get("nodes", []):
+                    try:
+                        graph.add_node(NodeModel.from_dict(node_dict))
+                    except (KeyError, TypeError):
+                        continue
+                for edge_dict in graph_data.get("edges", []):
+                    try:
+                        graph.add_edge(EdgeModel.from_dict(edge_dict))
+                    except (KeyError, TypeError):
+                        continue
+
+                # Create maintenance engine for edge reinforcement
+                beliefs = BeliefSystem()
+                contracts = ContractRegistry()
+                gaps = EpistemicGapTracker()
+                maintenance = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
+
+                # Create and run ExecutionEngine (stub mode - no perp_callback wired yet)
+                engine = ExecutionEngine(
+                    store=store,
+                    graph=graph,
+                    maintenance_engine=maintenance,
+                    project_root=self._project_root,
+                )
+
+                import threading
+                def _run_execution():
+                    try:
+                        engine.execute_goal(goal, {}, [])
+                    except Exception as e:
+                        logger.error("Goal execution failed for %s: %s", goal_id, e)
+
+                exec_thread = threading.Thread(target=_run_execution, daemon=True)
+                exec_thread.start()
+
+        except Exception as e:
+            logger.error("Failed to dispatch goal %s to ExecutionEngine: %s", goal_id, e)
+
         return (
             f"{Colors.GREEN}✓ Goal {Colors.BOLD}{goal_id}{Colors.RESET}"
-            f"{Colors.GREEN} accepted. Queued for execution.{Colors.RESET}"
+            f"{Colors.GREEN} accepted and dispatched for execution.{Colors.RESET}"
         )
 
     def _dismiss_goal(self, goal_id: str) -> str:

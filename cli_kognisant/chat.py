@@ -1376,6 +1376,9 @@ def run_api_chat(model_config, project_info=None):
                 tool_calls = None
                 try:
                     spinner.stop()
+                    # Show status indicator while waiting for first token
+                    status_spinner = Spinner("Connecting to model")
+                    status_spinner.start()
                     response_started = False
                     for chunk_type, data in query_model_api_stream(
                         model_config["api_base_url"],
@@ -1385,14 +1388,19 @@ def run_api_chat(model_config, project_info=None):
                     ):
                         if chunk_type == "content":
                             if not response_started:
+                                status_spinner.stop()
                                 print(f"\n{Colors.CYAN}Kognisant >{Colors.RESET}")
                                 response_started = True
                                 _streamed_response = True
                             sys.stdout.write(data)
                             sys.stdout.flush()
                         elif chunk_type == "tool_calls":
+                            if not response_started:
+                                status_spinner.stop()
                             tool_calls = data
                         elif chunk_type == "done":
+                            if not response_started:
+                                status_spinner.stop()
                             assistant_message = data
 
                     if response_started:
@@ -1510,7 +1518,7 @@ def run_api_chat(model_config, project_info=None):
                         )
                     print()
 
-                    spinner = Spinner("Kognisant is thinking")
+                    spinner = Spinner("Streaming follow-up")
                     spinner.start()
                     continue
                 else:

@@ -793,13 +793,6 @@ def main():
         "-s", "--status", action="store_true", help="Show detailed status of a spec"
     )
 
-    awesome_parser = subparsers.add_parser(
-        "awesome_feature", help="Trigger the awesome feature"
-    )
-    awesome_parser.add_argument(
-        "-l", "--level", type=int, default=1, help="Awesome level (1-10)"
-    )
-
     # --- Daemon subcommands ---
     daemon_parser = subparsers.add_parser(
         "daemon", help="Manage the background daemon process (POSIX-only: Linux, macOS)"
@@ -1006,11 +999,6 @@ def main():
                 )
         else:
             spec_parser.print_help()
-    elif args.command == "awesome_feature":
-        level = max(1, min(10, args.level))
-        print(
-            f"{Colors.BOLD}{Colors.MAGENTA}Awesome feature engaged at level {level}!{Colors.RESET}"
-        )
     elif args.command == "daemon":
         _handle_daemon(args)
     elif args.command == "job":

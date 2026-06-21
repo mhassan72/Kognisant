@@ -1082,8 +1082,14 @@ class GraphMaintenanceEngine:
         Firebreak (R9.2): halt propagation at 3 hops total from source.
         Since we only traverse 2 hops, edges at hops 0-1 (connecting nodes within 2 hops)
         are collected. The firebreak at 3 hops ensures we never go beyond.
+
+        Optimized: shares visited set across all source nodes to avoid
+        redundant traversals when modified nodes overlap in neighborhood.
         """
         affected_edge_ids: set[str] = set()
+        # Shared visited set: node_id -> min hops it was reached at
+        # This prevents re-exploring the same nodes from different sources
+        global_visited: dict[str, int] = {}
 
         for source_node in modified_nodes:
             if source_node not in self.graph._nodes:
@@ -1091,7 +1097,10 @@ class GraphMaintenanceEngine:
 
             # BFS up to DECAY_HOPS (2 hops)
             queue: deque[tuple[str, int]] = deque([(source_node, 0)])
-            visited: set[str] = {source_node}
+            # Only skip if previously visited at same or lower hop count
+            if source_node in global_visited and global_visited[source_node] <= 0:
+                continue
+            global_visited[source_node] = 0
 
             while queue:
                 current_id, hops = queue.popleft()
@@ -1109,11 +1118,13 @@ class GraphMaintenanceEngine:
                     affected_edge_ids.add(edge_id)
 
                     target = edge.target
-                    if target not in visited:
+                    next_hops = hops + 1
+                    # Only explore if we haven't seen this node at a lower hop count
+                    if target not in global_visited or global_visited[target] > next_hops:
                         # Firebreak check: don't go beyond 3 hops total
-                        if hops + 1 < self._FIREBREAK_HOPS:
-                            visited.add(target)
-                            queue.append((target, hops + 1))
+                        if next_hops < self._FIREBREAK_HOPS:
+                            global_visited[target] = next_hops
+                            queue.append((target, next_hops))
 
         return affected_edge_ids
 

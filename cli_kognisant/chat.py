@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import time
 
 from .colors import (
@@ -23,8 +22,7 @@ from .config import (
     save_providers_and_pool,
     set_default_model,
 )
-from .network import KognisantAPIError, query_model_api_raw, query_model_api_stream
-from .tools import execute_tool, get_active_tools
+from .runtime import execute_message
 
 
 def get_tool_call_description(func_name, func_args):
@@ -108,10 +106,10 @@ def build_system_prompt(project_info):
         )
 
     if global_skills:
-        prompt += "Additionally, you possess the following universal, transferable software engineering skills:\n"
+        prompt += "You possess the following universal software engineering skills (names only; apply them to any coding work):\n"
         for skill in global_skills:
-            prompt += f"### Global Skill: {skill['name']}\n```markdown\n{skill['content']}\n```\n\n"
-        prompt += "Apply these global standard skills to any coding solutions, refactoring, or designs you produce.\n\n"
+            prompt += f"  • {skill['name']}\n"
+        prompt += "\n"
 
     prompt += "You can refer to these files. If you need to view a file's content or list the files, you MUST use the provided tools (like 'read_project_file' or 'list_project_files') to retrieve the information directly instead of asking the user to read or paste them."
 
@@ -263,6 +261,7 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Jobs{Colors.RESET}          /jobs  /job stop|logs|restart|remove <name>")
         print(f"  {Colors.BOLD}Goals{Colors.RESET}         /goals  /goals accept|dismiss <id>")
         print(f"  {Colors.BOLD}World Model{Colors.RESET}   /worldmodel [enable|disable|status]")
+        print(f"  {Colors.BOLD}Telemetry{Colors.RESET}     /telemetry [model_name]")
         print(f"  {Colors.BOLD}Input{Colors.RESET}         /paste (multi-line mode)")
         print(f"  {Colors.BOLD}Session{Colors.RESET}       exit / quit\n")
         print(f"  {Colors.YELLOW}Note:{Colors.RESET} Daemon & jobs require POSIX (Linux/macOS). Cron times are in UTC.")
@@ -1124,6 +1123,15 @@ def process_slash_commands(
             print("World model not enabled. Enable it in .kognisant/config.json")
         return True
 
+    elif cmd == "/telemetry":
+        from .telemetry import format_telemetry_summary, format_model_telemetry, load_recent_telemetry
+        records = load_recent_telemetry(50)
+        if len(parts) > 1:
+            print(format_model_telemetry(records, parts[1]))
+        else:
+            print(format_telemetry_summary(records))
+        return True
+
     return False
 
 
@@ -1196,80 +1204,6 @@ def run_mock_chat(project_info=None):
 
 
 # ───────────────────────────────────────────────────────────
-# Context Window Management: Sliding Window + Tool Result Pruning
-# ───────────────────────────────────────────────────────────
-
-# Maximum number of recent turn pairs to keep in the API payload
-_MAX_RECENT_TURNS = 20
-# Maximum characters for a tool result before it gets pruned
-_TOOL_RESULT_PRUNE_THRESHOLD = 500
-
-
-def _prepare_api_messages(messages: list[dict], model_config: dict) -> list[dict]:
-    """Prepare a pruned message list for the LLM API call.
-
-    Applies two optimizations to reduce token count:
-    1. Tool result pruning: replaces verbose tool results from older turns
-       with compact summaries (keeps only recent tool results intact).
-    2. Sliding window: keeps the system prompt + last N turn pairs.
-
-    The full messages[] array on disk is never modified. This returns
-    a new list that is lighter for the API call.
-
-    Args:
-        messages: The full conversation history.
-        model_config: Model configuration (used for context_window hints).
-
-    Returns:
-        A pruned copy of messages suitable for the API payload.
-    """
-    if not messages:
-        return messages
-
-    # Step 1: Identify system prompt (always keep as first message)
-    system_messages = []
-    conversation_messages = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_messages.append(msg)
-        else:
-            conversation_messages.append(msg)
-
-    # Step 2: Apply sliding window on conversation messages
-    # Keep last _MAX_RECENT_TURNS * 2 messages (each turn = user + assistant)
-    max_messages = _MAX_RECENT_TURNS * 2
-    if len(conversation_messages) > max_messages:
-        conversation_messages = conversation_messages[-max_messages:]
-
-    # Step 3: Prune tool results from older messages (not the most recent cycle)
-    # Find the index of the last user message (marks the current turn boundary)
-    last_user_idx = -1
-    for i in range(len(conversation_messages) - 1, -1, -1):
-        if conversation_messages[i].get("role") == "user":
-            last_user_idx = i
-            break
-
-    pruned = []
-    for i, msg in enumerate(conversation_messages):
-        if msg.get("role") == "tool" and i < last_user_idx:
-            # This is a tool result from a previous turn. Prune if large.
-            content = msg.get("content", "")
-            if len(content) > _TOOL_RESULT_PRUNE_THRESHOLD:
-                pruned_msg = dict(msg)
-                tool_name = msg.get("name", "tool")
-                pruned_msg["content"] = (
-                    f"[Previously read: {tool_name} returned {len(content)} chars. "
-                    f"Content omitted for brevity. Re-read file if needed.]"
-                )
-                pruned.append(pruned_msg)
-            else:
-                pruned.append(msg)
-        else:
-            pruned.append(msg)
-
-    return system_messages + pruned
-
-
 def run_api_chat(model_config, project_info=None):
     """Active multi-turn LLM chat loop powered by standard compatible APIs with tool execution and self-healing fallback."""
     model_name = model_config["name"]
@@ -1341,277 +1275,20 @@ def run_api_chat(model_config, project_info=None):
                 save_chat_session(project_info, messages, session_file)
                 continue
 
-        # Checkpoint-Based Conversation Rollback: Save exact length of messages list before the turn
-        checkpoint_idx = len(messages)
+        # Delegate to runtime orchestrator (5-phase lifecycle)
+        result = execute_message(
+            user_message=cleaned_input,
+            messages=messages,
+            model_config=model_config,
+            project_info=project_info,
+            session_file=session_file,
+        )
 
-        messages.append({"role": "user", "content": cleaned_input})
-        save_chat_session(project_info, messages, session_file)
-
-        spinner = Spinner()
-        spinner.start()
-        _streamed_response = False
-        try:
-            success = False
-            while True:
-                # Prepare a pruned message payload for the API call.
-                # Full history stays in messages[] for disk persistence,
-                # but we send a trimmed version to reduce token count.
-                api_messages = _prepare_api_messages(messages, model_config)
-
-                payload = {
-                    "model": model_config["name"],
-                    "messages": api_messages,
-                    "stream": False,
-                }
-
-                # Check tool calling support dynamically
-                supports_tools = model_config.get("capabilities", {}).get(
-                    "tool_calling", True
-                )
-                if supports_tools:
-                    payload["tools"] = get_active_tools()
-
-                # Use streaming for faster time-to-first-token
-                assistant_message = None
-                tool_calls = None
-                try:
-                    spinner.stop()
-                    # Show status indicator while waiting for first token
-                    status_spinner = Spinner("Connecting to model")
-                    status_spinner.start()
-                    response_started = False
-                    for chunk_type, data in query_model_api_stream(
-                        model_config["api_base_url"],
-                        model_config["api_key"],
-                        payload,
-                        protocol=model_config.get("protocol", "openai"),
-                    ):
-                        if chunk_type == "content":
-                            if not response_started:
-                                status_spinner.stop()
-                                print(f"\n{Colors.CYAN}Kognisant >{Colors.RESET}")
-                                response_started = True
-                                _streamed_response = True
-                            sys.stdout.write(data)
-                            sys.stdout.flush()
-                        elif chunk_type == "tool_calls":
-                            if not response_started:
-                                status_spinner.stop()
-                            tool_calls = data
-                        elif chunk_type == "done":
-                            if not response_started:
-                                status_spinner.stop()
-                            assistant_message = data
-
-                    if response_started:
-                        print()  # Newline after streamed content
-
-                except KognisantAPIError:
-                    # Fallback to non-streaming if streaming fails
-                    spinner = Spinner()
-                    spinner.start()
-                    payload["stream"] = False
-                    resp_data = query_model_api_raw(
-                        model_config["api_base_url"],
-                        model_config["api_key"],
-                        payload,
-                        protocol=model_config.get("protocol", "openai"),
-                    )
-                    spinner.stop()
-
-                    if not resp_data or "choices" not in resp_data:
-                        raise KognisantAPIError(
-                            "Empty or malformed JSON returned from the model API."
-                        )
-                    choice = resp_data["choices"][0]
-                    assistant_message = choice["message"]
-                    tool_calls = assistant_message.get("tool_calls")
-
-                if assistant_message is None:
-                    raise KognisantAPIError(
-                        "No response received from the model API."
-                    )
-
-                # Check for tool_calls from the assistant message
-                if tool_calls is None:
-                    tool_calls = assistant_message.get("tool_calls")
-
-                if tool_calls and supports_tools:
-                    messages.append(assistant_message)
-                    save_chat_session(project_info, messages, session_file)
-
-                    spinner.stop()
-
-                    # 1. PLAN
-                    print(f"\n{Colors.BOLD}{Colors.CYAN}PLAN{Colors.RESET}")
-                    print("\033[90m────────────────────────────────────────────\033[0m")
-                    for tc in tool_calls:
-                        func_name = tc["function"]["name"]
-                        func_args = tc["function"]["arguments"]
-                        desc = get_tool_call_description(func_name, func_args)
-                        print(f"  • {desc}")
-                    print()
-
-                    # 2. EXECUTION
-                    print(f"{Colors.BOLD}{Colors.YELLOW}EXECUTION{Colors.RESET}")
-                    print("\033[90m────────────────────────────────────────────\033[0m")
-                    sys.stdout.flush()
-
-                    any_failed = False
-
-                    for tc in tool_calls:
-                        call_id = tc.get("id")
-                        func_name = tc["function"]["name"]
-                        func_args = tc["function"]["arguments"]
-                        desc = get_tool_call_description(func_name, func_args)
-
-                        # Write loading status
-                        sys.stdout.write(f"  {Colors.CYAN}◓{Colors.RESET} {desc} ...")
-                        sys.stdout.flush()
-
-                        try:
-                            result = execute_tool(func_name, func_args, project_info)
-                            is_err = isinstance(result, str) and (
-                                result.startswith("[Error]") or result.startswith("Error: [")
-                            )
-                        except Exception as ex:
-                            result = f"[Error] {ex}"
-                            is_err = True
-
-                        if is_err:
-                            any_failed = True
-                            err_msg = result.replace("[Error]", "").strip()
-                            if err_msg.startswith("["):
-                                # New format: "Error: [category] - description"
-                                err_msg = result
-                            if len(err_msg) > 60:
-                                err_msg = err_msg[:57] + "..."
-                            sys.stdout.write(
-                                f"\r  {Colors.RED}✗{Colors.RESET} {desc} {Colors.RED}failed{Colors.RESET} ({err_msg})\n"
-                            )
-                        else:
-                            sys.stdout.write(
-                                f"\r  {Colors.GREEN}✓{Colors.RESET} {desc}\n"
-                            )
-                        sys.stdout.flush()
-
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": func_name,
-                                "content": result,
-                            }
-                        )
-                        save_chat_session(project_info, messages, session_file)
-
-                    # 3. RESULT
-                    print(f"\n{Colors.BOLD}{Colors.GREEN}RESULT{Colors.RESET}")
-                    print("\033[90m────────────────────────────────────────────\033[0m")
-                    if any_failed:
-                        print(
-                            f"  {Colors.RED}Some tool executions encountered issues.{Colors.RESET}"
-                        )
-                    else:
-                        print(
-                            f"  {Colors.GREEN}All tools executed successfully.{Colors.RESET}"
-                        )
-                    print()
-
-                    spinner = Spinner("Streaming follow-up")
-                    spinner.start()
-                    continue
-                else:
-                    response = assistant_message.get("content") or ""
-                    messages.append(assistant_message)
-                    save_chat_session(project_info, messages, session_file)
-                    success = True
-                    break
-
-        except Exception as e:
-            # Self-healing handler: If error is because model doesn't support tools, disable tools and retry the prompt!
-            err_msg = str(e).lower()
-            if (
-                "does not support tools" in err_msg
-                or "tool_calling" in err_msg
-                or ("http error 400" in err_msg and "tool" in err_msg)
-            ):
-                if model_config.get("capabilities", {}).get("tool_calling", True):
-                    spinner.stop()
-                    print(
-                        f"  ⚠️  {Colors.YELLOW}Note:{Colors.RESET} '{display_name}' does not support tool calling. Resuming cleanly in standard chat mode..."
-                    )
-                    if "capabilities" not in model_config:
-                        model_config["capabilities"] = {}
-                    model_config["capabilities"]["tool_calling"] = False
-
-                    # Rollback checkpoint just in case
-                    while len(messages) > checkpoint_idx + 1:  # keep user prompt
-                        messages.pop()
-
-                    # Restart spinner and retry the completions query cleanly
-                    spinner = Spinner()
-                    spinner.start()
-                    continue
-
-            # Bulletproof rollback: Reset history exactly to checkpoint
-            while len(messages) > checkpoint_idx:
-                messages.pop()
-            save_chat_session(project_info, messages, session_file)
-
-            # Format and surface friendly, human-readable error messages
-            err_str = str(e)
-            if isinstance(e, KognisantAPIError):
-                if "401" in err_str:
-                    response = (
-                        f"\n  {Colors.RED}⚠️  API key was rejected (HTTP 401).{Colors.RESET}\n\n"
-                        f"  To fix this:\n"
-                        f"    1. Verify your API key is correct\n"
-                        f"    2. Type {Colors.CYAN}/model{Colors.RESET} to update your key\n"
-                        f"    3. Or switch to a different model\n"
-                    )
-                elif "429" in err_str:
-                    response = (
-                        f"\n  {Colors.YELLOW}⚠️  Rate limited (HTTP 429). Too many requests.{Colors.RESET}\n\n"
-                        f"  Wait a moment and try again, or switch to a different model with {Colors.CYAN}/model{Colors.RESET}\n"
-                    )
-                elif "Connection" in err_str or "URLError" in err_str or "timeout" in err_str.lower():
-                    response = (
-                        f"\n  {Colors.RED}⚠️  Cannot reach the model endpoint.{Colors.RESET}\n\n"
-                        f"  Possible fixes:\n"
-                        f"    • Check your internet connection\n"
-                        f"    • If using Ollama: ensure it's running ({Colors.CYAN}ollama serve{Colors.RESET})\n"
-                        f"    • If using Llama.cpp: ensure the server is started\n"
-                        f"    • Type {Colors.CYAN}/model{Colors.RESET} to switch providers\n"
-                    )
-                elif "malformed" in err_str.lower() or "parse" in err_str.lower():
-                    response = (
-                        f"\n  {Colors.YELLOW}⚠️  Received an invalid response from the model.{Colors.RESET}\n\n"
-                        f"  This sometimes happens with local models. Try again or switch models with {Colors.CYAN}/model{Colors.RESET}\n"
-                    )
-                else:
-                    response = (
-                        f"\n  {Colors.RED}⚠️  API Error: {err_str}{Colors.RESET}\n\n"
-                        f"  Your conversation was rolled back. Try again or type {Colors.CYAN}/model{Colors.RESET} to switch.\n"
-                    )
-            else:
-                response = (
-                    f"\n  {Colors.RED}⚠️  Unexpected error: {err_str}{Colors.RESET}\n\n"
-                    f"  Your conversation was rolled back safely. Try again.\n"
-                )
-            success = False
-        finally:
-            spinner.stop()
-
-        if success:
-            if not _streamed_response:
-                # Non-streamed fallback path: print the response normally
-                print(
-                    f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(response)}\n"
-                )
-            # If streaming already printed content, nothing more to do
-        else:
-            print(f"\n{response}\n")
+        if result.success and not result.streamed:
+            print(f"{Colors.CYAN}Kognisant >{Colors.RESET}\n{render_markdown(result.response)}\n")
+        elif result.error:
+            print(f"\n{result.error}\n")
+        # cancelled/streamed cases already handled inside runtime
 
 
 def select_model(

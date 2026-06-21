@@ -1,4 +1,5 @@
 import json
+import socket
 import ssl
 import time
 import urllib.error
@@ -142,10 +143,11 @@ def query_model_api(api_base_url, api_key, model_name, messages, protocol="opena
     )
 
 
-def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
+def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", timeout=120.0):
     """Send a streaming request to the LLM API. Yields (chunk_type, data) tuples.
 
     chunk_type is one of:
+      - "phase": data is a phase name (e.g. "connected")
       - "content": data is a text fragment to display
       - "tool_calls": data is the accumulated tool_calls list (yielded once at end)
       - "done": data is the full assembled assistant message dict
@@ -177,17 +179,29 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
     context = ssl._create_unverified_context()
 
     try:
-        response = urllib.request.urlopen(req, timeout=120.0, context=context)
+        response = urllib.request.urlopen(req, timeout=timeout, context=context)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
         raise KognisantAPIError(f"Streaming request failed: {e}")
 
     if response.status != 200:
         raise KognisantAPIError(f"HTTP Error {response.status} from streaming API.")
 
-    # Parse SSE stream
+    yield ("phase", "connected")
+
+    # Set socket-level stall timeout for read operations (best-effort)
+    try:
+        if hasattr(response.fp, '_sock') and response.fp._sock is not None:
+            response.fp._sock.settimeout(30.0)
+        elif hasattr(response.fp, 'raw') and hasattr(response.fp.raw, '_sock'):
+            response.fp.raw._sock.settimeout(30.0)
+    except (AttributeError, OSError):
+        pass  # Stall detection unavailable for this connection type (e.g. local Ollama)
+
+    # Parse SSE stream (or raw JSON for Ollama)
     content_parts = []
     tool_calls_accumulated = []
     assistant_role = "assistant"
+    usage_data = None
 
     try:
         for raw_line in response:
@@ -195,6 +209,35 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
 
             if not line:
                 continue
+
+            # Ollama native streaming: raw JSON objects, one per line (no SSE prefix)
+            if protocol == "ollama":
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Track usage if present
+                if "usage" in chunk and chunk["usage"]:
+                    usage_data = chunk["usage"]
+
+                # Ollama format: {"message": {"role": "assistant", "content": "..."}, "done": false}
+                if "message" in chunk:
+                    msg = chunk["message"]
+                    if "content" in msg and msg["content"]:
+                        content_parts.append(msg["content"])
+                        yield ("content", msg["content"])
+                    # Ollama tool calls
+                    if "tool_calls" in msg and msg["tool_calls"]:
+                        for tc in msg["tool_calls"]:
+                            tool_calls_accumulated.append(tc)
+
+                # Ollama signals completion with "done": true
+                if chunk.get("done", False):
+                    break
+                continue
+
+            # SSE format (OpenAI-compatible, llama.cpp, etc.)
             if line.startswith(":"):
                 continue  # SSE comment
             if not line.startswith("data:"):
@@ -208,6 +251,10 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
                 chunk = json.loads(data_str)
             except json.JSONDecodeError:
                 continue
+
+            # Track usage if present in chunk
+            if "usage" in chunk and chunk["usage"]:
+                usage_data = chunk["usage"]
 
             # Handle OpenAI-compatible streaming format
             if "choices" in chunk and len(chunk["choices"]) > 0:
@@ -237,13 +284,15 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
                             if "arguments" in fn and fn["arguments"]:
                                 tc["function"]["arguments"] += fn["arguments"]
 
-            # Handle Ollama native streaming format
+            # Handle Ollama native streaming format (fallback for OpenAI-compat endpoints)
             elif "message" in chunk:
                 msg = chunk["message"]
                 if "content" in msg and msg["content"]:
                     content_parts.append(msg["content"])
                     yield ("content", msg["content"])
 
+    except socket.timeout:
+        raise KognisantAPIError("Stream stalled — no data for 30s")
     except Exception:
         pass  # Stream ended unexpectedly, use what we have
     finally:
@@ -257,5 +306,8 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai"):
         assistant_message["tool_calls"] = tool_calls_accumulated
         assistant_message["content"] = full_content or None
         yield ("tool_calls", tool_calls_accumulated)
+
+    if usage_data:
+        assistant_message["_usage"] = usage_data
 
     yield ("done", assistant_message)

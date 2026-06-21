@@ -132,14 +132,37 @@ class TestRunWMDecayTick(unittest.TestCase):
         mock_store.load_graph.return_value = {"nodes": [], "edges": []}
         mock_load.return_value = mock_store
 
-        with patch("cli_kognisant.observer.ChangeDetector") as mock_cd_cls:
-            mock_cd = MagicMock()
-            mock_cd.detect_changes.return_value = {"modified_functions": []}
-            mock_cd_cls.return_value = mock_cd
+        with patch("cli_kognisant.daemon._WMGraphCache.get_changes") as mock_changes, \
+             patch("cli_kognisant.daemon._WMGraphCache.get_graph") as mock_get_graph, \
+             patch("cli_kognisant.daemon._WMGraphCache.save_graph") as mock_save_graph:
+            mock_changes.return_value = {"modified_functions": ["some_func"]}
+            # Return a real-ish graph tuple
+            from cli_kognisant.world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker
+            mock_get_graph.return_value = (DependencyGraph(), BeliefSystem(), ContractRegistry(), EpistemicGapTracker())
 
             result = _run_wm_decay_tick("/fake/project", logger)
             self.assertTrue(result)
-            mock_store.save_graph.assert_called_once()
+            mock_save_graph.assert_called_once()
+
+    @patch("cli_kognisant.config.is_world_model_enabled", return_value=True)
+    @patch("cli_kognisant.config.load_world_model")
+    def test_returns_true_no_modifications_skips_save(self, mock_load, mock_enabled):
+        """Fast path: no modifications means no decay needed, save is skipped."""
+        logger = MagicMock()
+        mock_store = MagicMock()
+        mock_store.load_graph.return_value = {"nodes": [], "edges": []}
+        mock_load.return_value = mock_store
+
+        with patch("cli_kognisant.daemon._WMGraphCache.get_changes") as mock_changes, \
+             patch("cli_kognisant.daemon._WMGraphCache.get_graph") as mock_get_graph, \
+             patch("cli_kognisant.daemon._WMGraphCache.save_graph") as mock_save_graph:
+            mock_changes.return_value = {"modified_functions": []}
+            from cli_kognisant.world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker
+            mock_get_graph.return_value = (DependencyGraph(), BeliefSystem(), ContractRegistry(), EpistemicGapTracker())
+
+            result = _run_wm_decay_tick("/fake/project", logger)
+            self.assertTrue(result)
+            mock_save_graph.assert_not_called()
 
     @patch("cli_kognisant.config.is_world_model_enabled", return_value=True)
     @patch("cli_kognisant.config.load_world_model", side_effect=Exception("oops"))

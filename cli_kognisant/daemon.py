@@ -53,6 +53,83 @@ _WM_DECAY_TICK_INTERVAL = 3600  # 60 minutes in seconds
 _WM_GIT_POLL_INTERVAL = 300  # 5 minutes in seconds
 _WM_RETRY_DELAY = 300  # 5 minutes in seconds
 
+# ─── World Model In-Memory Cache (Performance Optimization) ───────────────
+# Avoids redundant load→deserialize→serialize→save cycles within the same
+# daemon poll when decay_tick triggers generate_goals in sequence.
+
+class _WMGraphCache:
+    """Per-project in-memory cache for world model graph state.
+
+    Holds the deserialized DependencyGraph between sequential WM jobs within
+    a single poll cycle so that decay_tick → generate_goals doesn't require
+    a second full disk round-trip.
+
+    Cache is invalidated at the start of each daemon poll cycle.
+    """
+
+    _cache: dict[str, tuple] = {}  # project_root -> (graph, store, timestamp)
+    _change_cache: dict[str, dict] = {}  # project_root -> change detection result
+
+    @classmethod
+    def invalidate_all(cls) -> None:
+        """Clear all cached state — called at start of each poll cycle."""
+        cls._cache.clear()
+        cls._change_cache.clear()
+
+    @classmethod
+    def get_graph(cls, project_root: str, store):
+        """Get or build the DependencyGraph for a project.
+
+        Returns (graph, beliefs, contracts, gaps) tuple.
+        Caches the result for reuse within the same poll cycle.
+        """
+        if project_root in cls._cache:
+            return cls._cache[project_root]
+
+        from .models import Edge, Node
+        from .world_model import (
+            BeliefSystem, ContractRegistry, DependencyGraph,
+            EpistemicGapTracker,
+        )
+
+        graph_data = store.load_graph()
+        graph = DependencyGraph()
+        for node_dict in graph_data.get("nodes", []):
+            graph.add_node(Node.from_dict(node_dict))
+        for edge_dict in graph_data.get("edges", []):
+            graph.add_edge(Edge.from_dict(edge_dict))
+
+        beliefs = BeliefSystem()
+        contracts = ContractRegistry()
+        gaps = EpistemicGapTracker()
+
+        result = (graph, beliefs, contracts, gaps)
+        cls._cache[project_root] = result
+        return result
+
+    @classmethod
+    def save_graph(cls, project_root: str, graph, store) -> None:
+        """Serialize and save graph back to store. Updates cache in-place."""
+        nodes_out = [{"id": n.id, "node_type": n.node_type, "module": n.module,
+                      "file_path": n.file_path,
+                      "tags": n.tags, "line_start": n.line_start,
+                      "line_end": n.line_end, "last_modified": n.last_modified}
+                     for n in graph._nodes.values()]
+        edges_out = [e.to_dict() for e in graph._edges.values()]
+        store.save_graph({"nodes": nodes_out, "edges": edges_out})
+
+    @classmethod
+    def get_changes(cls, project_root: str, store) -> dict:
+        """Get or compute change detection results. Cached per poll cycle."""
+        if project_root in cls._change_cache:
+            return cls._change_cache[project_root]
+
+        from .observer import ChangeDetector
+        change_detector = ChangeDetector(project_root, store)
+        changes = change_detector.detect_changes()
+        cls._change_cache[project_root] = changes
+        return changes
+
 
 def _sigterm_handler(signum, frame):
     """Handle SIGTERM: set graceful shutdown flag (R12-AC1)."""
@@ -611,8 +688,8 @@ def _get_current_git_head(project_root: str) -> str | None:
 def _run_wm_decay_tick(project_root: str, logger) -> bool:
     """Execute a decay_tick job for the given project.
 
-    Loads world model, creates GraphMaintenanceEngine, runs decay_tick
-    with modified nodes from ChangeDetector, and saves results back.
+    Uses _WMGraphCache to avoid redundant deserialization when
+    generate_goals follows immediately after.
 
     Returns True on success, False on failure.
     """
@@ -623,45 +700,25 @@ def _run_wm_decay_tick(project_root: str, logger) -> bool:
 
     try:
         store = load_world_model(project_root)
-        graph_data = store.load_graph()
+        graph, beliefs, contracts, gaps = _WMGraphCache.get_graph(project_root, store)
 
-        from .models import Edge, Node
-        from .world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker, GraphMaintenanceEngine
-        from .observer import ChangeDetector
+        from .world_model import GraphMaintenanceEngine
 
-        # Reconstruct graph from stored data
-        graph = DependencyGraph()
-        for node_dict in graph_data.get("nodes", []):
-            graph.add_node(Node.from_dict(node_dict))
-        for edge_dict in graph_data.get("edges", []):
-            graph.add_edge(Edge.from_dict(edge_dict))
-
-        # Load beliefs, contracts, gaps
-        beliefs = BeliefSystem()
-        contracts = ContractRegistry()
-        gaps = EpistemicGapTracker()
-
-        # Detect changes to find modified nodes
-        change_detector = ChangeDetector(project_root, store)
-        changes = change_detector.detect_changes()
+        # Use cached change detection (avoids duplicate git subprocess calls)
+        changes = _WMGraphCache.get_changes(project_root, store)
         modified_nodes = changes.get("modified_functions", [])
+
+        # Skip decay if no modifications (fast path)
+        if not modified_nodes:
+            logger.info("World model decay_tick skipped (no modifications) for '%s'", project_root)
+            return True
 
         # Run decay tick
         engine = GraphMaintenanceEngine(graph, beliefs, contracts, gaps)
         engine.decay_tick(modified_nodes)
 
         # Save graph back
-        nodes_out = [{"id": n.id, "node_type": n.node_type, "module": n.module,
-                      "file_path": n.file_path, "confidence": n.confidence,
-                      "tags": n.tags, "line_start": n.line_start,
-                      "line_end": n.line_end}
-                     for n in graph._nodes.values()]
-        edges_out = [{"id": e.id, "source": e.source, "target": e.target,
-                      "edge_type": e.edge_type, "confidence": e.confidence,
-                      "provenance": e.provenance, "conditional": e.conditional,
-                      "version": e.version}
-                     for e in graph._edges.values()]
-        store.save_graph({"nodes": nodes_out, "edges": edges_out})
+        _WMGraphCache.save_graph(project_root, graph, store)
 
         logger.info("World model decay_tick completed for '%s'", project_root)
         return True
@@ -673,8 +730,8 @@ def _run_wm_decay_tick(project_root: str, logger) -> bool:
 def _run_wm_static_analysis(project_root: str, logger) -> bool:
     """Execute a static_analysis job for the given project.
 
-    Runs ChangeDetector.detect_changes() and if changes exist,
-    runs StaticAnalyzer on changed files.
+    Uses cached change detection to avoid duplicate git subprocess calls.
+    Skips pytest collection (moved to separate low-priority job).
 
     Returns True on success, False on failure.
     """
@@ -686,69 +743,33 @@ def _run_wm_static_analysis(project_root: str, logger) -> bool:
     try:
         store = load_world_model(project_root)
 
-        from .observer import ChangeDetector, StaticAnalyzer
+        from .observer import StaticAnalyzer
 
-        change_detector = ChangeDetector(project_root, store)
-        changes = change_detector.detect_changes()
+        # Use cached change detection (shared with decay_tick if both trigger)
+        changes = _WMGraphCache.get_changes(project_root, store)
 
-        # If there are changes, run static analysis on affected files
         added = changes.get("added_files", [])
         modified_funcs = changes.get("modified_functions", [])
 
-        if added or modified_funcs:
+        # Fast path: skip if no changes
+        if not added and not modified_funcs:
+            logger.info("World model static_analysis skipped (no changes) for '%s'", project_root)
+            return True
+
+        if added:
             analyzer = StaticAnalyzer(project_root, scope_config={"max_files": 1000})
-            # Analyze added files
-            for file_path in added:
-                abs_path = os.path.join(project_root, file_path)
-                if os.path.exists(abs_path) and abs_path.endswith(".py"):
-                    try:
-                        analyzer.analyze_file(abs_path)
-                    except Exception:
-                        pass  # Individual file failures are non-fatal
+            # Batch analyze: only .py files
+            py_files = [
+                os.path.join(project_root, fp) for fp in added
+                if fp.endswith(".py") and os.path.exists(os.path.join(project_root, fp))
+            ]
+            for abs_path in py_files:
+                try:
+                    analyzer.analyze_file(abs_path)
+                except Exception:
+                    pass  # Individual file failures are non-fatal
 
         logger.info("World model static_analysis completed for '%s'", project_root)
-
-        # Attempt to collect test results and feed to TestOutcomeTracker
-        try:
-            from .observer import TestOutcomeTracker
-            test_tracker = TestOutcomeTracker(project_root, store)
-
-            # Run pytest with coverage (best-effort, non-blocking)
-            test_result = subprocess.run(
-                ["python3", "-m", "pytest", "--tb=no", "-q", "--co", "-q"],
-                capture_output=True, text=True,
-                cwd=project_root, timeout=30,
-            )
-            # Only record if pytest is available and has results
-            if test_result.returncode in (0, 1):  # 0=all pass, 1=some fail
-                # Parse basic counts from pytest output
-                import re as _re
-                output = test_result.stdout.strip()
-                lines = output.splitlines()
-                last_line = lines[-1] if lines else ""
-                passed = failed = skipped = 0
-                m = _re.search(r'(\d+) passed', last_line)
-                if m: passed = int(m.group(1))
-                m = _re.search(r'(\d+) failed', last_line)
-                if m: failed = int(m.group(1))
-                m = _re.search(r'(\d+) skipped', last_line)
-                if m: skipped = int(m.group(1))
-                total = passed + failed + skipped
-
-                if total > 0:
-                    test_tracker.record_test_run({
-                        "total": total,
-                        "passed": passed,
-                        "failed": failed,
-                        "skipped": skipped,
-                        "duration_ms": 0,
-                        "failed_tests": [],
-                        "passed_tests": [],
-                        "coverage": None,
-                    })
-        except Exception:
-            pass  # Non-critical, never interrupt the main job
-
         return True
     except Exception as e:
         logger.error("World model static_analysis failed for '%s': %s", project_root, e)
@@ -758,7 +779,8 @@ def _run_wm_static_analysis(project_root: str, logger) -> bool:
 def _run_wm_generate_goals(project_root: str, logger) -> bool:
     """Execute a generate_goals job for the given project.
 
-    Creates GoalGenerator and calls generate_goals().
+    Uses _WMGraphCache to reuse the already-loaded graph from decay_tick
+    rather than loading it again from disk.
 
     Returns True on success, False on failure.
     """
@@ -769,22 +791,9 @@ def _run_wm_generate_goals(project_root: str, logger) -> bool:
 
     try:
         store = load_world_model(project_root)
-        graph_data = store.load_graph()
+        graph, beliefs, contracts, gaps = _WMGraphCache.get_graph(project_root, store)
 
-        from .models import Edge, Node
-        from .world_model import BeliefSystem, ContractRegistry, DependencyGraph, EpistemicGapTracker
         from .goal_engine import GoalGenerator
-
-        # Reconstruct graph
-        graph = DependencyGraph()
-        for node_dict in graph_data.get("nodes", []):
-            graph.add_node(Node.from_dict(node_dict))
-        for edge_dict in graph_data.get("edges", []):
-            graph.add_edge(Edge.from_dict(edge_dict))
-
-        beliefs = BeliefSystem()
-        contracts = ContractRegistry()
-        gaps = EpistemicGapTracker()
 
         generator = GoalGenerator(graph, contracts, gaps, beliefs, store)
         generator.generate_goals()
@@ -1111,6 +1120,9 @@ def _main_loop():
     _last_tick = time.monotonic()
 
     while not _shutdown_flag:
+        # --- Invalidate WM graph cache at start of each poll cycle ---
+        _WMGraphCache.invalidate_all()
+
         # --- (a) Check reload flag (R12-AC5) ---
         if _reload_flag:
             logger.info("Received SIGHUP, reloading job queue")

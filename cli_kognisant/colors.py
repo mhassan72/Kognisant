@@ -19,27 +19,56 @@ class Colors:
 class Spinner:
     """A thread-safe terminal spinner for displaying loading states."""
 
-    def __init__(self, message=f"{Colors.CYAN}Kognisant is thinking{Colors.RESET}"):
+    def __init__(self, message=f"{Colors.CYAN}Kognisant is thinking{Colors.RESET}", show_elapsed=False, timeout=None):
         self.message = message
         self.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.delay = 0.08
         self.stop_event = threading.Event()
         self.thread = None
+        self.show_elapsed = show_elapsed
+        self.timeout = timeout  # Optional timeout for relative hints
+        self._start_time = None
+
+    def update_message(self, new_msg: str):
+        """Update the spinner message while running (thread-safe in CPython)."""
+        self.message = new_msg
 
     def _spin(self):
         idx = 0
+        self._start_time = time.monotonic()
         while not self.stop_event.is_set():
             frame = self.frames[idx % len(self.frames)]
-            sys.stdout.write(f"\r{self.message} {Colors.CYAN}{frame}{Colors.RESET} ")
+            if self.show_elapsed:
+                elapsed = time.monotonic() - self._start_time
+                elapsed_str = f"{elapsed:.0f}s"
+                # Timeout-relative hints when timeout is provided
+                if self.timeout and self.timeout > 0:
+                    threshold_80 = self.timeout * 0.8
+                    threshold_50 = self.timeout * 0.5
+                    if elapsed > threshold_80:
+                        hint = f" — {Colors.YELLOW}Ctrl+C to cancel, /model to switch{Colors.RESET}"
+                    elif elapsed > threshold_50:
+                        hint = f" — {Colors.YELLOW}this may take a moment{Colors.RESET}"
+                    else:
+                        hint = ""
+                else:
+                    # Fallback to hardcoded thresholds
+                    if elapsed > 120:
+                        hint = f" — {Colors.YELLOW}Ctrl+C to cancel, /model to switch{Colors.RESET}"
+                    elif elapsed > 60:
+                        hint = f" — {Colors.YELLOW}large models may take 1-2 min{Colors.RESET}"
+                    else:
+                        hint = ""
+                display_msg = f"{self.message} — {elapsed_str}{hint}"
+            else:
+                display_msg = self.message
+            sys.stdout.write(f"\r\033[2K{display_msg} {Colors.CYAN}{frame}{Colors.RESET} ")
             sys.stdout.flush()
             idx += 1
             time.sleep(self.delay)
 
         # Clear the spinner line
-        raw_msg_len = len(
-            self.message.replace(Colors.CYAN, "").replace(Colors.RESET, "")
-        )
-        sys.stdout.write("\r" + " " * (raw_msg_len + 10) + "\r")
+        sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
 
     def start(self):

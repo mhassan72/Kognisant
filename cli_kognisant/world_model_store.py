@@ -174,19 +174,23 @@ class JsonWorldModelStore(WorldModelStore):
 
     # ─── Atomic Write Helper ────────────────────────────────────────────
 
-    def _atomic_write(self, path: str, data: object) -> None:
+    def _atomic_write(self, path: str, data: object, compact: bool = False) -> None:
         """Write data as JSON atomically: write to <path>.tmp then os.rename().
 
         Args:
             path: target file path
             data: JSON-serializable object
+            compact: if True, omit indent for faster writes (internal data)
         """
         self._ensure_dirs()
         dir_path = os.path.dirname(path)
         os.makedirs(dir_path, exist_ok=True)
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            if compact:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            else:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         os.rename(tmp_path, path)
 
     def _read_json(self, path: str) -> object | None:
@@ -314,14 +318,14 @@ class JsonWorldModelStore(WorldModelStore):
         for module, mod_nodes in module_nodes.items():
             index[module] = [n["id"] for n in mod_nodes]
 
-        # Write module shards
+        # Write module shards (compact format for performance)
         for module, mod_nodes in module_nodes.items():
             shard_data = {
                 "nodes": mod_nodes,
                 "edges": module_edges.get(module, []),
             }
             shard_path = os.path.join(self._modules_dir, f"{module}.json")
-            self._atomic_write(shard_path, shard_data)
+            self._atomic_write(shard_path, shard_data, compact=True)
 
             # Check shard size and warn if over limit
             self._check_shard_size(shard_path, module)
@@ -340,11 +344,11 @@ class JsonWorldModelStore(WorldModelStore):
 
         # Write index
         index_path = os.path.join(self._graph_dir, "index.json")
-        self._atomic_write(index_path, index)
+        self._atomic_write(index_path, index, compact=True)
 
         # Write cross-module edges
         cross_module_path = os.path.join(self._graph_dir, "cross_module.json")
-        self._atomic_write(cross_module_path, cross_module_edges)
+        self._atomic_write(cross_module_path, cross_module_edges, compact=True)
 
     def _check_shard_size(self, shard_path: str, module_name: str) -> None:
         """Check if a shard exceeds 500KB and log a warning once per session."""

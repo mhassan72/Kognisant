@@ -608,23 +608,27 @@ class GoalGenerator:
         complexity > 15 AND either high churn (3+ modifications in 30 days)
         or no test coverage.
 
-        Uses subprocess to compute complexity via AST and git log for churn.
+        Optimized: batches git log calls per-file rather than per-node.
         """
         goals: list[Goal] = []
 
-        for node in list(self._graph._nodes.values()):
-            if node.node_type != "function":
-                continue
+        # Pre-compute churn data for all unique file paths in one batch
+        function_nodes = [n for n in self._graph._nodes.values() if n.node_type == "function"]
+        if not function_nodes:
+            return goals
 
-            # Compute cyclomatic complexity via AST subprocess
+        unique_files = set(n.file_path for n in function_nodes if n.file_path)
+        churn_cache = self._batch_check_churn(unique_files)
+
+        for node in function_nodes:
+            # Compute cyclomatic complexity via AST (in-process, no subprocess)
             complexity = self._compute_complexity_for_node(node)
             if complexity is None or complexity <= 15:
                 continue
 
-            # Check churn: 3+ modifications in last 30 days via git log
-            has_high_churn = self._check_churn(node.file_path, node.id)
-            # Check coverage: stub - we consider no coverage if node has no
-            # dynamic edges (simplification for initial implementation)
+            # Check churn from batch cache
+            has_high_churn = churn_cache.get(node.file_path, False)
+            # Check coverage: no dynamic edges = no coverage
             has_no_coverage = not any(
                 e.provenance == "dynamic"
                 for e in self._graph.get_edges_from(node.id)
@@ -657,6 +661,8 @@ class GoalGenerator:
 
         Creates a goal of type "stale_artifact" when a file has not been
         modified in 90 days and contains nodes with confidence < 0.4.
+
+        Optimized: batches staleness check into a single git log call.
         """
         goals: list[Goal] = []
 
@@ -666,9 +672,14 @@ class GoalGenerator:
             if node.file_path:
                 file_nodes[node.file_path].append(node)
 
+        if not file_nodes:
+            return goals
+
+        # Batch staleness check: single git log call for all files
+        stale_files = self._batch_check_staleness(set(file_nodes.keys()), days=90)
+
         for file_path, nodes in file_nodes.items():
-            # Check if file is stale (>90 days since last git modification)
-            if not self._is_file_stale(file_path, days=90):
+            if file_path not in stale_files:
                 continue
 
             # Count nodes with confidence < 0.4 (check edges from each node)
@@ -901,6 +912,94 @@ class GoalGenerator:
             return analyzer.compute_complexity(file_path, func_name)
         except Exception:
             return None
+
+    def _batch_check_churn(self, file_paths: set[str]) -> dict[str, bool]:
+        """Batch check churn for multiple files in a single git log call.
+
+        Returns dict mapping file_path -> True if 3+ commits in last 30 days.
+        Replaces N individual subprocess calls with 1.
+        """
+        result: dict[str, bool] = {fp: False for fp in file_paths}
+        if not file_paths:
+            return result
+
+        try:
+            # Single git log call with --name-only to get all files modified in last 30 days
+            git_result = subprocess.run(
+                ["git", "log", "--oneline", "--name-only", "--since=30 days ago"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if git_result.returncode != 0:
+                return result
+
+            # Count how many commits touch each file
+            file_commit_counts: dict[str, int] = defaultdict(int)
+            current_commit = False
+            for line in git_result.stdout.strip().split("\n"):
+                if not line:
+                    current_commit = False
+                    continue
+                # Lines starting with a hash are commit headers
+                if not current_commit and line and not line.startswith(" "):
+                    current_commit = True
+                    continue
+                # File name lines (after commit header)
+                if line.strip():
+                    file_commit_counts[line.strip()] += 1
+
+            for fp in file_paths:
+                result[fp] = file_commit_counts.get(fp, 0) >= 3
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return result
+
+    def _batch_check_staleness(self, file_paths: set[str], days: int = 90) -> set[str]:
+        """Batch check which files are stale (>N days since last modification).
+
+        Returns set of file paths that are stale.
+        Single git log call replaces N individual subprocess calls.
+        """
+        stale_files: set[str] = set()
+        if not file_paths:
+            return stale_files
+
+        import time as _time
+        cutoff_ts = int(_time.time()) - (days * 86400)
+
+        try:
+            # Get last commit timestamp for ALL tracked files in one call
+            git_result = subprocess.run(
+                ["git", "log", "--format=%ct", "--name-only", "--diff-filter=AM",
+                 f"--since={days * 2} days ago"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if git_result.returncode != 0:
+                # Fallback: assume nothing is stale
+                return stale_files
+
+            # Parse: lines alternate between timestamp and filenames
+            recently_modified: set[str] = set()
+            for line in git_result.stdout.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                # Skip timestamps (pure digits)
+                if line.isdigit():
+                    continue
+                recently_modified.add(line)
+
+            # Files NOT in recently_modified set are stale
+            for fp in file_paths:
+                if fp not in recently_modified:
+                    stale_files.add(fp)
+
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return stale_files
 
     def _check_churn(self, file_path: str, node_id: str) -> bool:
         """Check if a file has 3+ modifications in the last 30 days via git log.

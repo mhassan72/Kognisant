@@ -126,7 +126,8 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
         response_content = ""
 
         # Limit tool calls to prevent infinite loops in automated background agents
-        while attempts < 5:
+        # Higher limit (12) needed for autonomous pipeline tasks: research + write script + schedule job
+        while attempts < 12:
             # Check for pause and abort before each tool execution turn
             if SwarmController.stop_event.is_set():
                 return
@@ -260,8 +261,130 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                 },
             ]
 
+            # Autonomous pipeline tools: script creation, job scheduling, web search
+            autonomous_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_script",
+                        "description": "Create a new Python script in the global scripts folder (~/.kognisant_core/scripts/) with accompanying metadata. Use this to create long-running pipeline scripts that the daemon will execute.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Script name (lowercase alphanumeric, hyphens, underscores, 1-64 chars).",
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The Python script content to write.",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Human-readable description of what the script does.",
+                                },
+                                "env_vars": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "List of required environment variable names for this script.",
+                                },
+                            },
+                            "required": ["name", "content"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "schedule_job",
+                        "description": "Create a new job in the job queue. For 'scheduled' type, a valid cron expression is required. For 'persistent' type, the script runs continuously. The daemon executes these autonomously in the background.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Job name (lowercase alphanumeric, hyphens, underscores, 1-64 chars).",
+                                },
+                                "script_path": {
+                                    "type": "string",
+                                    "description": "Script filename in ~/.kognisant_core/scripts/ (e.g. 'my-script.py'). Required for persistent and scheduled job types.",
+                                },
+                                "job_type": {
+                                    "type": "string",
+                                    "enum": ["scheduled", "persistent", "agent"],
+                                    "description": "The type of job: 'scheduled' (cron-based), 'persistent' (always-on long-running), or 'agent' (one-shot AI task).",
+                                },
+                                "cron_expression": {
+                                    "type": "string",
+                                    "description": "A 5-field cron expression (e.g., '*/15 * * * *'). Required when job_type is 'scheduled'.",
+                                },
+                                "task": {
+                                    "type": "string",
+                                    "description": "Task description for agent-type jobs. Required when job_type is 'agent'.",
+                                },
+                                "env_vars": {
+                                    "type": "object",
+                                    "description": "Environment variables to pass to the job (key-value pairs).",
+                                },
+                            },
+                            "required": ["name", "job_type"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_web",
+                        "description": "Perform a headless background web search using DuckDuckGo and return the text search results. Use for researching requirements, finding documentation, or discovering resources needed for the task.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The search query.",
+                                }
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "browse_web_page",
+                        "description": "Fetch a public webpage URL and return readable text content. Use to read documentation or reference material needed for script creation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "description": "The absolute URL to fetch.",
+                                }
+                            },
+                            "required": ["url"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_scripts",
+                        "description": "List all scripts in the global scripts folder with their names and descriptions.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_jobs",
+                        "description": "List all jobs in the job queue with their name, type, and current state.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+            ]
+
             # Merge with globally transferable tools dynamically
-            subagent_tools = baseline_tools + load_global_tools()
+            subagent_tools = baseline_tools + autonomous_tools + load_global_tools()
 
             # OpenAI / Cloud completion with full tool access
             payload = {

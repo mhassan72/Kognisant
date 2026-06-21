@@ -1,4 +1,4 @@
-# Kognisant CLI — Runtime Realignment Plan
+# Kognisant CLI  - Runtime Realignment Plan
 
 > Comprehensive redesign of the chat execution pipeline to implement a 5-phase
 > cognitive lifecycle: **Bootstrap → Plan → Execute → Reflect → Persist**.
@@ -13,16 +13,16 @@
 - [Problem Statement](#problem-statement)
 - [Architecture Overview](#architecture-overview)
 - [Execution Flow Diagram](#execution-flow-diagram)
-- [Phase 1 — Bootstrap](#phase-1--bootstrap)
+- [Phase 1  - Bootstrap](#phase-1--bootstrap)
 - [Critique & Refinements](#critique--refinements-5-iterations)
-- [Phase 2 — Plan](#phase-2--plan)
-- [Phase 3 — Execute](#phase-3--execute)
-- [Phase 4 — Reflect](#phase-4--reflect)
-- [Phase 5 — Persist](#phase-5--persist)
+- [Phase 2  - Plan](#phase-2--plan)
+- [Phase 3  - Execute](#phase-3--execute)
+- [Phase 4  - Reflect](#phase-4--reflect)
+- [Phase 5  - Persist](#phase-5--persist)
 - [SelfModel Engine](#selfmodel-engine)
 - [FastPath Classifier](#fastpath-classifier)
 - [Circuit Breaker](#circuit-breaker)
-- [User Experience — What the User Sees](#user-experience--what-the-user-sees)
+- [User Experience  - What the User Sees](#user-experience--what-the-user-sees)
 - [File Structure](#file-structure)
 - [Data Schemas](#data-schemas)
 - [Integration Points](#integration-points)
@@ -45,11 +45,11 @@ User types "hello"
 ```
 
 **Failures observed:**
-1. No communication to user during wait — "paranoia-inducing black box"
-2. No classification — "hello" gets same payload as "refactor the auth module"
-3. No learning — same timeout repeats forever, no model fallback
-4. No graceful cancellation — Ctrl+C crashes with full traceback
-5. No circuit breaking — dead endpoints are hammered indefinitely
+1. No communication to user during wait  - "paranoia-inducing black box"
+2. No classification  - "hello" gets same payload as "refactor the auth module"
+3. No learning  - same timeout repeats forever, no model fallback
+4. No graceful cancellation  - Ctrl+C crashes with full traceback
+5. No circuit breaking  - dead endpoints are hammered indefinitely
 6. Empty responses displayed as blank lines with no explanation
 
 ### Target State
@@ -98,8 +98,8 @@ runtime.py
   ├── fast_path_classifier.py    (Plan phase)
   ├── self_model_engine.py       (Bootstrap + model selection + circuit breaker)
   ├── reflect_engine.py          (Reflect phase)
-  ├── network.py                 (Execute phase — LLM calls)
-  ├── tools.py                   (Execute phase — tool execution)
+  ├── network.py                 (Execute phase  - LLM calls)
+  ├── tools.py                   (Execute phase  - tool execution)
   └── config.py                  (model pool, project info)
 ```
 
@@ -107,7 +107,7 @@ runtime.py
 
 ## Execution Flow Diagram
 
-### Happy Path (SIMPLE message — "hello")
+### Happy Path (SIMPLE message  - "hello")
 
 ```
 User input: "hello"
@@ -133,7 +133,7 @@ User input: "hello"
      │
      ▼
 ┌─ EXECUTE ────────────────────────────────────────────┐
-│  1. Print: "⚙️  GPT OSS 120b — 0s"                  │
+│  1. Print: "⚙️  GPT OSS 120b  - 0s"                  │
 │  2. Stream tokens to stdout as they arrive           │
 │  3. Update elapsed timer on spinner                  │
 │  4. On Ctrl+C → clean rollback, stay in chat         │
@@ -156,14 +156,14 @@ User input: "hello"
 └───────────────────────────────────────────────────────┘
 ```
 
-### Happy Path (CONTEXT message — "what are we working on?")
+### Happy Path (CONTEXT message  - "what are we working on?")
 
 ```
 User input: "what are we working on?"
      │
      ▼
 ┌─ BOOTSTRAP (20ms) ───────────────────────────────────┐
-│  Same as above — load state, select model            │
+│  Same as above  - load state, select model            │
 └───────────────────────────────────────────────────────┘
      │
      ▼
@@ -189,14 +189,14 @@ User input: "what are we working on?"
   REFLECT + PERSIST (same as SIMPLE)
 ```
 
-### Happy Path (COMPLEX message — "fix the bug in auth.py")
+### Happy Path (COMPLEX message  - "fix the bug in auth.py")
 
 ```
 User input: "fix the bug in auth.py"
      │
      ▼
 ┌─ BOOTSTRAP (20ms) ───────────────────────────────────┐
-│  Same — load state, select model                     │
+│  Same  - load state, select model                     │
 └───────────────────────────────────────────────────────┘
      │
      ▼
@@ -249,7 +249,7 @@ User input: "hello"
      │
      ▼
 ┌─ EXECUTE ────────────────────────────────────────────┐
-│  1. Spinner: "⚙️  Nemotron-550B (NVidia) — 0s"      │
+│  1. Spinner: "⚙️  Nemotron-550B (NVidia)  - 0s"      │
 │  2. Timer counts: 10s... 20s... 30s (SIMPLE timeout) │
 │  3. TIMEOUT at 30s                                   │
 │  4. Print: "⚠️  Timeout after 30s"                   │
@@ -303,7 +303,7 @@ User input: "hello"
 
 ```
 ┌─ EXECUTE ─────────────────────────────────────────────┐
-│  Spinner: "⚙️  Nemotron-550B (NVidia) — 45s"         │
+│  Spinner: "⚙️  Nemotron-550B (NVidia)  - 45s"         │
 │  User presses Ctrl+C                                  │
 └───────────────────────────────────────────────────────┘
      │
@@ -314,13 +314,13 @@ User input: "hello"
 │  3. Record as "cancelled" (valence: -5)               │
 │  4. Print: "Cancelled. Model was taking too long."    │
 │  5. Print: "Tip: /model to switch"                    │
-│  6. Return to prompt — chat stays alive               │
+│  6. Return to prompt  - chat stays alive               │
 └───────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Phase 1 — Bootstrap
+## Phase 1  - Bootstrap
 
 **Purpose:** Load all cognitive state, inventory local capabilities, check system health, select the best model.
 Runs every message. Pure local computation. No network calls.
@@ -407,12 +407,12 @@ class BootstrapState:
 ### Valence Inputs (comprehensive)
 
 Valence isn't just about "did the last LLM call work." It reflects the total health
-of the system — tools, scripts, jobs, learning state:
+of the system  - tools, scripts, jobs, learning state:
 
 ```python
 # Valence is influenced by:
 
-# 1. LLM interaction success/failure (primary driver — ±5 to ±15 per execution)
+# 1. LLM interaction success/failure (primary driver  - ±5 to ±15 per execution)
 # 2. Tool reliability (background signal):
 #    - If avg tool reliability across all tools drops below 0.5 → valence pressure -2/execution
 #    - If all tools above 0.8 → no pressure
@@ -468,7 +468,7 @@ must handle this gracefully and communicate clearly:
 
 ```
 FIRST RUN:
-  ⚡ Welcome — first execution. Using Nemotron-550B (configured default). No history yet.
+  ⚡ Welcome  - first execution. Using Nemotron-550B (configured default). No history yet.
 
 SUBSEQUENT RUNS:
   ⚡ GPT OSS 120b | valence: +22 | 15 skills, 6 tools, 0 jobs active
@@ -486,9 +486,9 @@ The ⚙️ spinner must distinguish between "waiting for server to accept connec
 and "server connected, waiting for model to generate":
 
 ```
-⚙️  GPT OSS 120b — connecting... 1s        ← HTTP request in flight
-⚙️  GPT OSS 120b — thinking... 5s          ← Headers received, waiting for first SSE chunk
-⚙️  GPT OSS 120b — streaming... 8s         ← First token arrived, actively receiving
+⚙️  GPT OSS 120b  - connecting... 1s        ← HTTP request in flight
+⚙️  GPT OSS 120b  - thinking... 5s          ← Headers received, waiting for first SSE chunk
+⚙️  GPT OSS 120b  - streaming... 8s         ← First token arrived, actively receiving
 ```
 
 Implementation: `urllib.request.urlopen()` blocks until headers arrive. Once it returns
@@ -535,7 +535,7 @@ When all configured models have circuit breakers in OPEN state:
 The runtime waits for the shortest cooldown to expire, then attempts one half_open
 test with that model. If it succeeds → proceed. If it fails → try next shortest.
 
-This prevents the user from being stuck with "no model available, do nothing" —
+This prevents the user from being stuck with "no model available, do nothing"  -
 the system actively recovers by waiting the minimum necessary time.
 
 Maximum wait: 30s (the circuit breaker cooldown period). If all cooldowns are >30s,
@@ -544,10 +544,10 @@ just try the one that failed longest ago.
 ### Refinement 4: History Window and Context Continuity
 
 The sliding window (SIMPLE: 2, CONTEXT: 10, COMPLEX: 20) can lose context from
-earlier turns. This is by design — to prevent token overflow — but must be documented:
+earlier turns. This is by design  - to prevent token overflow  - but must be documented:
 
 **Rule:** The LAST assistant response is ALWAYS included regardless of window size.
-This ensures continuity — the model always knows what it just said, even in SIMPLE mode.
+This ensures continuity  - the model always knows what it just said, even in SIMPLE mode.
 
 Updated history rules:
 ```
@@ -560,10 +560,10 @@ If the user says "thanks" (SIMPLE), the model sees its own last response and can
 say something contextual like "You're welcome! Let me know if the auth fix works."
 instead of a generic "You're welcome!"
 
-### Refinement 5: Fast Tool — No Animation Flicker
+### Refinement 5: Fast Tool  - No Animation Flicker
 
 Tools that complete in <150ms (most file operations) should NOT show the animated
-spinner. The animation would flicker for 1 frame then disappear — ugly and distracting.
+spinner. The animation would flicker for 1 frame then disappear  - ugly and distracting.
 
 **Rule:** Tool execution is synchronous on the main thread. Animation is conditional:
 
@@ -573,10 +573,10 @@ result = execute_tool(name, args, project_info)
 duration = time.monotonic() - start
 
 if duration < 0.15:
-    # Fast tool — print completed box directly (no animation, no flicker)
+    # Fast tool  - print completed box directly (no animation, no flicker)
     _print_static_tool_box(tool_name, args, success, duration, summary)
 else:
-    # Slow tool — animation was running, finalize it
+    # Slow tool  - animation was running, finalize it
     # (animation thread started preemptively, joined here)
     _finalize_animated_tool_box(success, duration, summary)
 ```
@@ -626,7 +626,7 @@ for raw_line in response:
 # In a separate watchdog thread (or checked between line reads):
 if time.monotonic() - last_data_at > STALL_TIMEOUT:
     response.close()
-    raise KognisantAPIError("Stream stalled — no data for 30s")
+    raise KognisantAPIError("Stream stalled  - no data for 30s")
 ```
 
 The stall timeout is separate from the connection timeout:
@@ -635,8 +635,8 @@ The stall timeout is separate from the connection timeout:
 
 User sees:
 ```
-⚙️  Nemotron-550B — streaming... 45s
-⚠️  Stream stalled — no data received for 30s. Connection dropped.
+⚙️  Nemotron-550B  - streaming... 45s
+⚠️  Stream stalled  - no data received for 30s. Connection dropped.
 ```
 
 ### Refinement 7: Unexpected Tool Calls in CONTEXT Mode
@@ -652,7 +652,7 @@ Log it in telemetry as `unexpected_tool_calls: true`.
 ```python
 # In Execute phase:
 if tool_calls and ctx.classification in ("SIMPLE", "CONTEXT"):
-    # Model hallucinated tool calls without schemas — ignore them
+    # Model hallucinated tool calls without schemas  - ignore them
     tool_calls = None
     ctx.telemetry["unexpected_tool_calls"] = True
 ```
@@ -686,7 +686,7 @@ except (KeyboardInterrupt, Exception):
 
 **Contract:** The runtime is responsible for ALL mutations to `messages[]` and ALL
 rollbacks. The chat.py caller never touches messages during execution. On return,
-`messages[]` is in a consistent state — either the full turn was applied (success)
+`messages[]` is in a consistent state  - either the full turn was applied (success)
 or it was rolled back to `checkpoint_idx` (failure/cancel).
 
 ### Refinement 9: Token Estimate Calibration
@@ -712,7 +712,7 @@ if api_response.get("usage"):
 
 Future estimates: `estimated_tokens = (len(text) // 4) * model.token_calibration`
 
-This isn't critical for correctness — the system works fine with ±30% estimates.
+This isn't critical for correctness  - the system works fine with ±30% estimates.
 But over time, the displayed token counts become more accurate per model.
 
 ### Refinement 10: Multi-Round Timeout Budget
@@ -722,7 +722,7 @@ LLM call. The timeout must be per-round, not per-execution:
 
 ```
 Round 1: LLM call (120s timeout) → returns tool_calls
-         Tool execution (no timeout — tools have their own limits)
+         Tool execution (no timeout  - tools have their own limits)
 Round 2: LLM call (120s timeout) → returns tool_calls
          Tool execution
 Round 3: LLM call (120s timeout) → returns final response
@@ -733,18 +733,18 @@ execution can take up to `3 × 120s + tool_execution_time` in the worst case.
 
 User sees the ⚙️ spinner reset for each round:
 ```
-⚙️  GPT OSS 120b — connecting... 0s     (round 1)
+⚙️  GPT OSS 120b  - connecting... 0s     (round 1)
   ┌─ Read auth.py ──────────────────────┐
   │ ✓ 0.01s | 2.8KB                    │
   └─────────────────────────────────────┘
-⚙️  GPT OSS 120b — connecting... 0s     (round 2 — timer resets)
+⚙️  GPT OSS 120b  - connecting... 0s     (round 2  - timer resets)
 ```
 
 This prevents a scenario where round 1 takes 100s (leaving only 20s for round 2).
 
 ---
 
-## Phase 2 — Plan
+## Phase 2  - Plan
 **Purpose:** Classify the message and build the minimum viable payload.
 No LLM call. Rule-based classification.
 
@@ -828,7 +828,7 @@ maintain conversational continuity. The model always knows what it just said.
 
 ---
 
-## Phase 3 — Execute
+## Phase 3  - Execute
 
 **Purpose:** Call the LLM, handle streaming, manage tool loops, handle errors.
 
@@ -840,7 +840,7 @@ maintain conversational continuity. The model always knows what it just said.
 │                                                        │
 │  1. Single LLM call (no tools in payload)              │
 │  2. Stream tokens directly to stdout                   │
-│  3. No tool loop — response is final                   │
+│  3. No tool loop  - response is final                   │
 │  4. Timeout: 30s (SIMPLE) or 60s (CONTEXT)             │
 └────────────────────────────────────────────────────────┘
 
@@ -864,16 +864,16 @@ maintain conversational continuity. The model always knows what it just said.
 ```
 START:
   Stop previous spinner
-  Print phase spinner: "⚙️  [model_name] — connecting... 0s"
+  Print phase spinner: "⚙️  [model_name]  - connecting... 0s"
   
 HTTP RESPONSE HEADERS RECEIVED:
-  Update spinner: "⚙️  [model_name] — thinking... Xs"
+  Update spinner: "⚙️  [model_name]  - thinking... Xs"
   
 FIRST TOKEN ARRIVES:
   Stop phase spinner
   Print: "Kognisant >"
   Set _streamed = True
-  Update spinner (brief): "⚙️  [model_name] — streaming..."
+  Update spinner (brief): "⚙️  [model_name]  - streaming..."
   
 SUBSEQUENT TOKENS:
   Write directly to stdout (no buffering)
@@ -892,7 +892,7 @@ TIMEOUT (no response within timeout window):
 
 ### Tool Execution Flow (COMPLEX only)
 
-Each tool call is rendered as a self-contained box — no separate PLAN/EXECUTION/RESULT
+Each tool call is rendered as a self-contained box  - no separate PLAN/EXECUTION/RESULT
 headers. The box appears inline as the model requests tools, showing the function
 signature at the top and the result inside:
 
@@ -910,7 +910,7 @@ Model returns tool_calls
 │                                                        │
 │  Print result inside box:                              │
 │    │ ✓ 0.02s | 4.1KB read                         │   │
-│    — or —                                              │
+│     - or  -                                              │
 │    │ ✗ 2.1s | Connection timeout                   │   │
 │                                                        │
 │  Print box bottom:                                     │
@@ -970,7 +970,7 @@ Border, tool name, and result line are all red.
 | In-progress B | `#F39C12` | `\033[38;2;243;156;18m` | Orange phase of pulse |
 | Success | `#27AE60` | `\033[38;2;39;174;96m` | Final ✓ state |
 | Failure | `#E74C3C` | `\033[38;2;231;76;60m` | Final ✗ state |
-| Spinner chars | — | — | `◐ ◓ ◑ ◒` (rotate at 150ms) |
+| Spinner chars |  - |  - | `◐ ◓ ◑ ◒` (rotate at 150ms) |
 
 ### Animation Sequence
 
@@ -1044,7 +1044,7 @@ def _finalize_tool_box(success: bool, duration: float, summary: str):
 ### Full Animated Flow (what the user sees in real-time)
 
 ```
-⚙️  GPT OSS 120b — 8s
+⚙️  GPT OSS 120b  - 8s
 
   ┌─ Reading cli_kognisant/network.py ──────────────────────────────────┐
   │ ◐ reading...                    ← (pulsing gray↔orange, spinner rotating)
@@ -1063,7 +1063,7 @@ def _finalize_tool_box(success: bool, duration: float, summary: str):
   │ ✓ 0.03s | 3 edits applied                                          │
   └─────────────────────────────────────────────────────────────────────┘
 
-⚙️  GPT OSS 120b — 4s (follow-up, +1,024 tokens from tool results)
+⚙️  GPT OSS 120b  - 4s (follow-up, +1,024 tokens from tool results)
 ```
 
 ### Action Label Mapping
@@ -1109,14 +1109,14 @@ tense ("Read successfully" / "Accepted edits to...").
   └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**After success — header redraws with completed label:**
+**After success  - header redraws with completed label:**
 ```
   ┌─ Accepted edits to auth.py ─────────────────────────────────────────┐
   │ ✓ 0.03s | 3 edits applied                                          │
   └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**After failure — header redraws with failed label:**
+**After failure  - header redraws with failed label:**
 ```
   ┌─ Rejected edits to auth.py ─────────────────────────────────────────┐
   │ ✗ 0.01s | old_text not found                                        │
@@ -1287,12 +1287,12 @@ IF LLM returns HTTP 400 with "tools" in error message:
   1. Set model capabilities.tool_calling = False in SelfModel
   2. Remove tools from payload
   3. Retry the same request (1 retry)
-  4. Print: "⚠️  [model] doesn't support tools — conversation mode"
+  4. Print: "⚠️  [model] doesn't support tools  - conversation mode"
 ```
 
 ---
 
-## Phase 4 — Reflect
+## Phase 4  - Reflect
 
 **Purpose:** Learn from the interaction. Update confidence, valence, reliability.
 No LLM calls. Pure local computation.
@@ -1390,7 +1390,7 @@ On WARM/COLD, additional lines appear below.
 
 ---
 
-## Phase 5 — Persist
+## Phase 5  - Persist
 
 **Purpose:** Atomically save all state changes to disk.
 
@@ -1658,7 +1658,7 @@ CODE_PATTERN = re.compile(r'[a-z]+_[a-z]+|[A-Z][a-z]+[A-Z]|__\w+__')
 | "thanks" | 1 | none | SIMPLE |
 | "good morning" | 2 | none | SIMPLE |
 | "ok got it" | 3 | none | SIMPLE |
-| "what are we working on?" | 6 | none (no action verb) | SIMPLE... wait — |
+| "what are we working on?" | 6 | none (no action verb) | SIMPLE... wait  - |
 
 **Correction:** "what are we working on?" is 6 words and has no action verbs, but it needs project context. The SIMPLE gate needs one more check:
 
@@ -1681,13 +1681,13 @@ if word_count <= 6:
 | "hello" | 1 | none | SIMPLE |
 | "thanks" | 1 | none | SIMPLE |
 | "what are we working on?" | 6 | "we", "working" → project ref | CONTEXT |
-| "explain decorators" | 2 | none, but >educational → fails SIMPLE check? | — |
+| "explain decorators" | 2 | none, but >educational → fails SIMPLE check? |  - |
 
 **Issue:** "explain decorators" is 2 words, no action verbs, no file refs. It would be SIMPLE. But it's a knowledge question that benefits from context.
 
-**Resolution:** This is actually fine. "explain decorators" can be answered with a minimal system prompt. The model knows what decorators are without project context. SIMPLE is correct here — and will get a fast response.
+**Resolution:** This is actually fine. "explain decorators" can be answered with a minimal system prompt. The model knows what decorators are without project context. SIMPLE is correct here  - and will get a fast response.
 
-If the user meant "explain how we use decorators in THIS project" — they'd say more words, which would push it past SIMPLE.
+If the user meant "explain how we use decorators in THIS project"  - they'd say more words, which would push it past SIMPLE.
 
 ---
 
@@ -1765,7 +1765,7 @@ class CircuitBreaker:
 
 ---
 
-## User Experience — What the User Sees
+## User Experience  - What the User Sees
 
 ### Minimal Output (SIMPLE success)
 
@@ -1773,7 +1773,7 @@ class CircuitBreaker:
 You > hello
 ⚡ GPT OSS 120b | valence: +22 | 15 skills, 6 tools, 0 jobs active
 📋 SIMPLE → ~210 tokens input
-⚙️  GPT OSS 120b — 2s
+⚙️  GPT OSS 120b  - 2s
 
 Kognisant >
 Hello! What can I help you with?
@@ -1787,7 +1787,7 @@ Hello! What can I help you with?
 You > what are we working on?
 ⚡ GPT OSS 120b | valence: +27 | project: research (context.md loaded)
 📋 CONTEXT → ~1,840 tokens input
-⚙️  GPT OSS 120b — 5s
+⚙️  GPT OSS 120b  - 5s
 
 Kognisant >
 Based on the project memory, we're currently working on...
@@ -1802,13 +1802,13 @@ Based on the project memory, we're currently working on...
 You > fix the import error in network.py
 ⚡ GPT OSS 120b | valence: +30 | project: research | WM: 47 nodes
 📋 COMPLEX → ~8,420 tokens input (sys: 2,100 + tools: 4,200 + hist: 1,800 + msg: 320)
-⚙️  GPT OSS 120b — 8s
+⚙️  GPT OSS 120b  - 8s
 
   ┌─ Read cli_kognisant/network.py ───────────────────────────────────────┐
   │ ✓ 0.02s | 4.1KB read                                               │
   └─────────────────────────────────────────────────────────────────────┘
 
-⚙️  GPT OSS 120b — 4s (follow-up, +1,024 tokens from tool result)
+⚙️  GPT OSS 120b  - 4s (follow-up, +1,024 tokens from tool result)
 
 Kognisant >
 I found the issue. The import on line 3...
@@ -1823,7 +1823,7 @@ I found the issue. The import on line 3...
 You > refactor auth.py and update the tests
 ⚡ GPT OSS 120b | valence: +33 | project: research
 📋 COMPLEX → ~9,100 tokens input (sys: 2,100 + tools: 4,200 + hist: 2,200 + msg: 600)
-⚙️  GPT OSS 120b — 12s
+⚙️  GPT OSS 120b  - 12s
 
   ┌─ Read auth.py ────────────────────────────────────────────────────────┐
   │ ✓ 0.01s | 2.8KB read                                               │
@@ -1838,7 +1838,7 @@ You > refactor auth.py and update the tests
   │ ✓ 0.02s | 2 edits applied                                          │
   └─────────────────────────────────────────────────────────────────────┘
 
-⚙️  GPT OSS 120b — 6s (follow-up, +3,840 tokens from tool results)
+⚙️  GPT OSS 120b  - 6s (follow-up, +3,840 tokens from tool results)
 
 Kognisant >
 Done. I refactored the auth module to use...
@@ -1865,7 +1865,7 @@ You > hello
 ⚡ Switching → GPT OSS 120b (GROQ)
   ⚠️  nvidia/nemotron-3-ultra-550b-a55b: 1/4 success, avg 180s, circuit: OPEN
 📋 SIMPLE → ~210 tokens input
-⚙️  GPT OSS 120b — 1s
+⚙️  GPT OSS 120b  - 1s
 
 Kognisant >
 Hey! What can I do for you?
@@ -1879,7 +1879,7 @@ Hey! What can I do for you?
 You > hello
 ⚡ Nemotron-550B | valence: +12 | circuit: half_open (testing)
 📋 SIMPLE → ~210 tokens input
-⚙️  Nemotron-550B — 30s — TIMEOUT
+⚙️  Nemotron-550B  - 30s  - TIMEOUT
 
 ⚠️  No response in 30s (SIMPLE timeout).
    Tip: /model to switch to a faster model.
@@ -1929,7 +1929,7 @@ def estimate_tokens(text: str) -> int:
     
     This is accurate within ±10% for English text and code.
     Exact counts would require a tokenizer (tiktoken etc.) which
-    would add a dependency — we stay stdlib-only.
+    would add a dependency  - we stay stdlib-only.
     """
     return len(text) // 4
 ```
@@ -1946,7 +1946,7 @@ Token summary in Reflect:
 
 For COMPLEX with tool loops, token counts accumulate across rounds:
 ```
-⚙️  GPT OSS 120b — 4s (follow-up, +1,024 tokens from tool result)
+⚙️  GPT OSS 120b  - 4s (follow-up, +1,024 tokens from tool result)
 ```
 
 ### Persisted Telemetry (stored per execution)
@@ -2004,11 +2004,11 @@ Every execution appends a record to `~/.kognisant_core/telemetry.jsonl` (JSON Li
 
 | Aspect | Detail |
 |--------|--------|
-| Format | JSON Lines (.jsonl) — one JSON object per line, append-only |
+| Format | JSON Lines (.jsonl)  - one JSON object per line, append-only |
 | Location | `~/.kognisant_core/telemetry.jsonl` |
 | Rotation | When file exceeds 5MB, rename to `telemetry.1.jsonl` (keep 1 backup) |
 | Retention | Last 1000 executions minimum |
-| Write mode | Append-only (`open("a")`) — no locking needed, no corruption risk |
+| Write mode | Append-only (`open("a")`)  - no locking needed, no corruption risk |
 | Failure | If write fails, log warning, never interrupt execution |
 
 ### `/telemetry` Slash Command
@@ -2045,12 +2045,12 @@ You > /telemetry
   Circuit breakers: all closed
 ```
 
-### `/telemetry <model>` — Per-Model Deep Dive
+### `/telemetry <model>`  - Per-Model Deep Dive
 
 ```
 You > /telemetry GPT OSS 120b
 
-📊 GPT OSS 120b (GROQ) — Telemetry
+📊 GPT OSS 120b (GROQ)  - Telemetry
 ──────────────────────────────────────────────────────────
   Total calls:          42
   Success rate:         92% (39/42)
@@ -2102,7 +2102,7 @@ append_telemetry(telemetry_record)
 
 ### How Telemetry Informs Decisions
 
-The telemetry data isn't just for display — it drives decisions:
+The telemetry data isn't just for display  - it drives decisions:
 
 | Data Point | Decision It Informs |
 |-----------|-------------------|
@@ -2306,12 +2306,12 @@ It is not modified by this refactor.
 
 ### How existing /spec command is NOT affected
 
-Same — handled by slash commands, separate pipeline.
+Same  - handled by slash commands, separate pipeline.
 
 ### How the daemon/jobs system is NOT affected
 
 The daemon runs in a separate process. The runtime only governs interactive chat messages.
-Background jobs use `ProcessManager` and the job queue — completely orthogonal.
+Background jobs use `ProcessManager` and the job queue  - completely orthogonal.
 
 ---
 
@@ -2384,7 +2384,7 @@ circuit breaker logic, model selection algorithm.
 
 **Dependencies:** None (stdlib only: json, os, time).
 
-**Testable via:** Unit tests — append record, read back, aggregation functions.
+**Testable via:** Unit tests  - append record, read back, aggregation functions.
 
 **Delivers:**
 - `append_telemetry(record: dict)` → appends JSON line to telemetry.jsonl
@@ -2488,18 +2488,18 @@ Before listing what we skip, here's what already exists and how it maps into the
 | **Daemon** | ✅ Built | `daemon.py` | Running state check | Background (not part of chat runtime) |
 | **World Model** | ✅ Built | `<project>/.kognisant/world_model/` | Node/edge count, staleness | Background (daemon maintains it) |
 | **Goal Engine** | ✅ Built | `goal_engine.py` | Active goals count | Session-start display, `/goals` command |
-| **Observer** | ✅ Built | `observer.py` | — | PERP traces, static analysis (daemon) |
+| **Observer** | ✅ Built | `observer.py` |  - | PERP traces, static analysis (daemon) |
 | **SDD/Specs** | ✅ Built | `<project>/.kognisant/specs/` | Active spec list | `/spec` command, PERP integration |
 | **Context.md** | ✅ Built | `<project>/.kognisant/context.md` | Full content | CONTEXT/COMPLEX: in system prompt |
 | **Memory Guidelines** | ✅ Built | `<project>/.kognisant/memory-guidlines.md` | Full content | CONTEXT/COMPLEX: in system prompt |
 | **Chat History** | ✅ Built | `<project>/.kognisant/history/` | Session count | Experience level signal |
 | **Model Pool** | ✅ Built | `~/.kognisant_core/models_pool.json` | Compiled models | Model selection in Bootstrap |
-| **PERP Agent** | ✅ Built | `agents.py` | — | `/agent` command (separate from runtime) |
-| **Network Layer** | ✅ Built | `network.py` | — | Execute phase: streaming + fallback |
+| **PERP Agent** | ✅ Built | `agents.py` |  - | `/agent` command (separate from runtime) |
+| **Network Layer** | ✅ Built | `network.py` |  - | Execute phase: streaming + fallback |
 | **Graduated Autonomy** | ✅ Built | `goal_engine.py` | Autonomy config | Goal execution decisions |
 | **Learning Loop** | ✅ Built | `goal_engine.py` | Acceptance rates | Valence background signal |
 
-### What the Runtime Brings (NEW — not yet built)
+### What the Runtime Brings (NEW  - not yet built)
 
 | Component | Purpose | Replaces |
 |-----------|---------|----------|
@@ -2659,7 +2659,7 @@ Before listing what we skip, here's what already exists and how it maps into the
    Consistent with the existing pyproject.toml `dependencies = []`.
 
 9. **Backwards compatible.**
-   Slash commands, /agent, /spec, daemon, jobs — all unchanged.
+   Slash commands, /agent, /spec, daemon, jobs  - all unchanged.
    The runtime replaces only the inner message-handling loop in chat.py.
 
 10. **Testable in isolation.**
@@ -2683,7 +2683,7 @@ Before listing what we skip, here's what already exists and how it maps into the
 | Learning speed | Same Bayesian formula | Same Bayesian formula |
 | Recovery | OMEGA (fork-and-compare generations) | Auto-switch to reliable alternative |
 
-The CLI version captures the **essence** — classification, learning, transparency, graceful failure —
+The CLI version captures the **essence**  - classification, learning, transparency, graceful failure  -
 without the infrastructure overhead of multi-tenant cloud operation.
 
 ---

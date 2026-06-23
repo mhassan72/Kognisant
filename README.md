@@ -72,15 +72,25 @@ Done. I've replaced the session-based auth with JWT:
 
 | Feature | Kognisant | Claude Code | Codex CLI | Gemini CLI | Aider |
 |---------|-----------|-------------|-----------|------------|-------|
-| Persistent memory across sessions | ✓ | ✗ | ✗ | ✗ | Partial |
-| Works with any LLM | ✓ | Claude only | OpenAI only | Gemini only | Multi-model |
-| Autonomous multi-agent execution | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Background daemon with job scheduling | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Self-building tools | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Codebase world model | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Zero dependencies | ✓ | npm | pip | gcloud | pip |
-| Reasoning display (thinking tokens) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Fully open source | ✓ | ✗ | ✓ | ✗ | ✓ |
+| Persistent memory across sessions | :green_circle: | :red_circle: | :red_circle: | :red_circle: | Partial |
+| Works with any LLM | :green_circle: | Claude only | OpenAI only | Gemini only | Multi-model |
+| Autonomous multi-agent execution | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Background daemon with job scheduling | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Self-building tools | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Codebase world model | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Goal engine (auto-generates improvements) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Graduated autonomy (learns from feedback) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Spec-Driven Development (requirements > design > tasks) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Cognitive state (valence, self-model) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Per-model circuit breakers and auto-switch | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Dynamic agent escalation (auto-detects complex tasks) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Script factory (AI writes and schedules scripts) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Execution telemetry (/telemetry command) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Headless web browsing (Chrome/Brave JS rendering) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Browser console capture (dev tools) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Reasoning display (thinking tokens) | :green_circle: | :red_circle: | :red_circle: | :red_circle: | :red_circle: |
+| Zero dependencies | :green_circle: | npm | pip | gcloud | pip |
+| Fully open source | :green_circle: | :red_circle: | :green_circle: | :red_circle: | :green_circle: |
 
 ---
 

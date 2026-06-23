@@ -1,4 +1,4 @@
-# Kognisant 🧠
+# Kognisant
 
 **Your AI remembers everything. Across every project. Forever.**
 
@@ -7,15 +7,19 @@
 ![Project Status](https://img.shields.io/badge/status-active-success.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 
-Kognisant is a terminal-native AI assistant with persistent memory, self-building tools, and autonomous background execution. It connects to any LLM (local or cloud) and gets smarter the more you use it.
+Kognisant is a terminal-native AI assistant with persistent memory, a 5-phase cognitive runtime, self-building tools, and autonomous background execution. It connects to any LLM (local or cloud) and gets smarter the more you use it.
 
 Most AI CLI tools give you a stateless chat session. You explain your project structure every time. You re-teach patterns. You lose context between sessions. Kognisant solves this with a two-layer memory architecture that gives the AI a continuous understanding of your environment: a world model that persists, compounds, and transfers across everything you work on.
 
-It's not limited to code. Research, writing, planning, automation, web browsing - Kognisant handles any structured work from your terminal.
+It is not limited to code. Research, writing, planning, automation, web browsing - Kognisant handles any structured work from your terminal.
 
 ---
 
 ## Why Kognisant?
+
+### It thinks transparently
+
+Every execution runs through a 5-phase cognitive lifecycle: Bootstrap, Plan, Execute, Reflect, Persist. You see exactly what the system is doing at every step: which model is active, how it classified your message, how many tokens it used, and what it learned. Reasoning models (gemma4, deepseek-r1, qwen3) stream their thinking process in real-time so you can watch the AI reason through your request.
 
 ### It remembers
 
@@ -23,7 +27,7 @@ Every project gets a local memory layer (`.kognisant/context.md`) that tracks ar
 
 ### It builds its own tools
 
-When Kognisant encounters a task it can't handle with its built-in toolkit, it can create new tools on the spot, writing both the schema and implementation, and store them globally. Next time it (or you) needs that capability, it's already there. Tools compound. Skills compound. The system gets more capable over time without you installing anything.
+When Kognisant encounters a task it cannot handle with its built-in toolkit, it can create new tools on the spot, writing both the schema and implementation, and store them globally. Next time it (or you) needs that capability, it is already there. Tools compound. Skills compound. The system gets more capable over time without you installing anything.
 
 ### It works while you sleep
 
@@ -33,26 +37,29 @@ A production-hardened background daemon runs scripts, cron jobs, monitoring task
 
 The World Model builds a living dependency graph of your project. It tracks function calls, imports, class hierarchies, and test outcomes with confidence scores. When code changes, it detects what went stale. When patterns break, it suggests fixes. When coverage gaps grow, it flags them. The system learns from your responses (accept or dismiss) and calibrates its suggestions over time, graduating from "ask every time" to "handle it automatically" as trust builds.
 
-### It's not just for code
+### It escalates intelligently
 
-Web search, headless page browsing, browser console capture, desktop browser control. Kognisant's toolkit makes it useful for research, documentation, planning, and general knowledge work. The PERP agent (Plan > Execute > Reflect > Persist) can break down and complete any structured task, not just programming.
+Simple greetings get a fast 30-second response. Complex tasks with tools get a 2-minute window. Multi-step autonomous work (research + analysis + writing) is automatically detected and delegated to the PERP agent swarm with no manual intervention. The system classifies every message and routes it to the right execution mode.
 
 ### Zero dependencies. Zero lock-in.
 
-Built entirely on the Python 3.10+ standard library. No bloated dependency tree. No vendor lock-in. Switch between Ollama, Llama.cpp, OpenAI, DeepSeek, Groq, or any OpenAI-compatible endpoint mid-session. Your data stays local.
+Built entirely on the Python 3.10+ standard library. No bloated dependency tree. No vendor lock-in. Switch between Ollama, Llama.cpp, OpenAI, DeepSeek, Groq, NVidia, Kimi, or any OpenAI-compatible endpoint mid-session. Your data stays local.
 
 ---
 
 ## Table of Contents
 
 - [How It Works](#how-it-works)
+- [The 5-Phase Runtime](#the-5-phase-runtime)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Memory Architecture](#memory-architecture)
-- [Self-Building Tools & Skills](#self-building-tools--skills)
+- [Self-Building Tools and Skills](#self-building-tools-and-skills)
 - [Autonomous Agent (PERP Swarm)](#autonomous-agent-perp-swarm)
-- [Background Daemon & Job Scheduling](#background-daemon--job-scheduling)
+- [Dynamic Agent Escalation](#dynamic-agent-escalation)
+- [Background Daemon and Job Scheduling](#background-daemon-and-job-scheduling)
 - [World Model](#world-model)
+- [Model Pool and Selection](#model-pool-and-selection)
 - [Slash Commands](#slash-commands)
 - [Built-in Toolkit](#built-in-toolkit)
 - [Project Structure](#project-structure)
@@ -79,9 +86,12 @@ Built entirely on the Python 3.10+ standard library. No bloated dependency tree.
                                │
               ┌────────────────▼────────────────┐
               │  KOGNISANT RUNTIME               │
+              │  ├── 5-Phase Lifecycle           │
+              │  ├── FastPath Classifier         │
               │  ├── Any LLM (local or cloud)    │
               │  ├── Tool execution sandbox      │
               │  ├── PERP agent swarm            │
+              │  ├── SelfModel (cognitive state) │
               │  └── Background daemon           │
               └────────────────┬────────────────┘
                                │
@@ -89,14 +99,88 @@ Built entirely on the Python 3.10+ standard library. No bloated dependency tree.
          │  MEMORY (Membrain)                         │
          │  ├── Local: .kognisant/context.md          │
          │  │   (project architecture, decisions)     │
-         │  └── Global: ~/.kognisant_core/            │
-         │      ├── skills/  (transferable knowledge) │
-         │      ├── tools/   (self-built capabilities)│
-         │      └── scripts/ (autonomous executables) │
+         │  ├── Global: ~/.kognisant_core/            │
+         │  │   ├── skills/  (transferable knowledge) │
+         │  │   ├── tools/   (self-built capabilities)│
+         │  │   ├── scripts/ (autonomous executables) │
+         │  │   ├── self_model.json (cognitive state) │
+         │  │   └── telemetry.jsonl (execution log)   │
+         │  └── Thinking: session_*_thinking.json     │
+         │      (reasoning traces per session)        │
          └───────────────────────────────────────────┘
 ```
 
-On every session start, Kognisant loads your project's local memory and all global skills into context. The AI knows where it is, what it's working on, and what it's learned before. You don't have to say a word.
+On every session start, Kognisant loads your project's local memory and all global skills into context. The AI knows where it is, what it's working on, and what it has learned before. You do not have to say a word.
+
+---
+
+## The 5-Phase Runtime
+
+Every non-slash user message passes through exactly 5 phases:
+
+```
+User presses Enter
+    │
+    ▼
+⚡ BOOTSTRAP - Load cognitive state, select model, check circuit breakers
+    │           Print: model name, valence, capabilities
+    ▼
+📋 PLAN     - Classify message (SIMPLE/CONTEXT/COMPLEX/AUTONOMOUS)
+    │           Build system prompt, set timeout, estimate tokens
+    ▼
+⚙️  EXECUTE  - Stream LLM response with sub-state tracking
+    │           Handle tool calls (animated boxes), retry on failure
+    ▼
+🔍 REFLECT  - Update valence, model reliability, tool reliability
+    │           HOT (every turn), WARM (every 3rd), COLD (every 20th)
+    ▼
+💾 PERSIST  - Atomic save of cognitive state
+```
+
+### Classification Tiers
+
+| Tier | Criteria | Behavior |
+|------|----------|----------|
+| SIMPLE | Short greeting, no tools needed | Minimal prompt, 30s timeout (local: 120s) |
+| CONTEXT | Question about project, explanation | Project context included, 60s timeout (local: 180s) |
+| COMPLEX | Action verb + file/code, 1-3 tool calls | Full prompt + tools, 120s timeout (local: 300s) |
+| AUTONOMOUS | Multi-step task (research + write) | Auto-escalates to PERP agent swarm |
+
+### Reasoning Display
+
+Models that support reasoning (gemma4, deepseek-r1, qwen3) stream their thinking process in real-time:
+
+```
+💭 Thinking...
+  1. Analyze the request: The user wants to refactor auth.
+  2. I need to read the current auth module first.
+  3. The JWT library is already imported but unused.
+💭 Thought for 8.3s
+
+Kognisant >
+Here is the refactored authentication module...
+```
+
+Thinking is saved per-session in a separate file and never pollutes the chat context window. Use `/thinking` to review past reasoning.
+
+### SelfModel (Cognitive State)
+
+The SelfModel persists between sessions and tracks:
+- **Valence** (-100 to +100): overall system health score
+- **Model reliability**: Bayesian confidence per model (successes/failures)
+- **Tool reliability**: per-tool success rates
+- **Circuit breakers**: per-model (5 failures in 30s opens the breaker)
+- **Token calibration**: per-model correction factor for estimates
+- **Capabilities**: reasoning, tool_calling (learned dynamically)
+
+### Retry Strategy
+
+Every execution gets up to 3 attempts before reporting failure:
+1. Normal streaming request with classification timeout
+2. Retry with 2x extended timeout
+3. Final retry with maximum timeout (300s local, 120s remote)
+
+Retries only trigger for timeouts and empty responses. Auth errors (401, 402, 403, 429) fail immediately.
 
 ---
 
@@ -179,7 +263,7 @@ Kognisant's memory is what makes it fundamentally different from a stateless cha
 .kognisant/
 ├── config.json      # Workspace name, file exclusions
 ├── context.md       # Persistent build memory (the AI reads and writes this)
-├── history/         # Session logs for continuity
+├── history/         # Session logs + thinking traces
 └── specs/           # Feature specifications (SDD)
 ```
 
@@ -190,26 +274,20 @@ The `context.md` file is your project's living knowledge base. The AI reads it o
 ```
 ~/.kognisant_core/
 ├── projects.json       # Registry of all your workspaces
-├── models_pool.json    # Configured providers & sticky default model
+├── models_pool.json    # Configured providers with capabilities
+├── self_model.json     # Cognitive state (valence, reliability, circuit breakers)
+├── telemetry.jsonl     # Per-execution log (append-only, rotates at 5MB)
 ├── skills/             # Transferable markdown knowledge files
-│   ├── coding_standards.md
-│   ├── web_browser_steering.md
-│   └── global_tool_development.md
 ├── tools/              # Self-built tool schemas + implementations
-│   ├── search_web.json + .py
-│   ├── browse_web_page.json + .py
-│   └── (any tools the AI creates for you)
 ├── scripts/            # Autonomous executable scripts + metadata
 └── logs/               # Daemon execution logs
 ```
 
-Global skills are injected into every session. When the AI learns a pattern, like how you structure your tests or how you handle API conventions, that knowledge persists globally and improves every future session across all projects.
+Global skills are injected into every session. When the AI learns a pattern, that knowledge persists globally and improves every future session across all projects.
 
 ---
 
-## Self-Building Tools & Skills
-
-This is where Kognisant diverges from conventional AI assistants.
+## Self-Building Tools and Skills
 
 ### Dynamic Tool Creation
 
@@ -219,27 +297,15 @@ When you ask Kognisant to do something beyond its built-in toolkit, it can build
 2. Creates a Python implementation (`~/.kognisant_core/tools/tool_name.py`) that runs as an isolated subprocess
 3. The tool is immediately available in the current and all future sessions
 
-The AI follows a strict development contract: tools must use only Python stdlib, accept arguments via `sys.argv[1]` as JSON, and output results to stdout. This ensures portability and safety.
+The AI follows a strict development contract: tools must use only Python stdlib, accept arguments via `sys.argv[1]` as JSON, and output results to stdout.
 
 ### Transferable Skills
 
-Skills are markdown documents in `~/.kognisant_core/skills/` that steer the AI's behavior. They're loaded into every session's system prompt. Examples that ship by default:
-
-- **coding_standards.md** - Your code style preferences and conventions
-- **web_browser_steering.md** - When and how to use browser-based tools
-- **global_tool_development.md** - The contract for building new tools
-
-You can create new skills manually, or the AI will create them when it learns something worth remembering. They're your AI's long-term memory.
+Skills are markdown documents in `~/.kognisant_core/skills/` that steer the AI's behavior. They are loaded into every session's system prompt. You can create new skills manually, or the AI will create them when it learns something worth remembering.
 
 ### Script Factory
 
-Scripts (`~/.kognisant_core/scripts/`) are executable Python files with metadata that can be scheduled as daemon jobs. The AI can:
-
-- Create scripts with `create_script` (atomic two-phase write with rollback)
-- Edit them with `edit_script` (sequential find-replace with full rollback on failure)
-- Schedule them as persistent services, cron jobs, or one-shot agent tasks
-
-The pipeline: identify a need, write a script, schedule it, it runs autonomously. All from a chat conversation.
+Scripts (`~/.kognisant_core/scripts/`) are executable Python files with metadata that can be scheduled as daemon jobs. The AI can create scripts, edit them, and schedule them as persistent services, cron jobs, or one-shot agent tasks. All from a chat conversation.
 
 ---
 
@@ -249,21 +315,47 @@ The `/agent <task>` command triggers a four-stage autonomous pipeline:
 
 | Stage | What Happens |
 |-------|-------------|
-| **Plan** | A planning model analyzes the task, project context, and memory. Produces a phased execution strategy with parallelizable subtasks. |
-| **Execute** | Subtask agents run in parallel threads (grouped by phase). Each agent has tool access: read, write, create, delete files, browse web. |
-| **Reflect** | A reflection model evaluates outcomes against the original intent. If goals aren't met, it generates corrective adjustments and loops back (up to 2 correction cycles). |
-| **Persist** | Successful outcomes and learnings are written back to `context.md`. The project's memory grows. |
+| **Plan** | A reasoning-capable model analyzes the task. Produces a phased execution strategy with parallelizable subtasks. |
+| **Execute** | Subtask agents run in parallel threads (grouped by phase). Each agent has full tool access. |
+| **Reflect** | A reflection model evaluates outcomes. If goals are not met, it generates corrective adjustments (up to 2 correction cycles). |
+| **Persist** | Successful outcomes and learnings are written back to `context.md`. |
 
 The swarm features:
-- Dynamic capability routing (cloud models for planning, local models for tasks)
+- Dynamic capability-based model selection (reasoning models for planning, any model for tasks)
+- Cascading fallback on model failure (402/403/429 tries the next model, never gives up)
+- Per-worker token tracking with swarm completion summary
 - CPU-aware concurrency throttling for local models
 - Thread-safe pause/resume/stop controls
-- Spec-Driven Development integration (executes against formal specs when available)
-- Tool calls sandboxed to project root with symlink protection
+- Spec-Driven Development integration
+- Artifact tracking (lists all created/modified files on completion)
 
 ---
 
-## Background Daemon & Job Scheduling
+## Dynamic Agent Escalation
+
+The runtime automatically detects when a task is too complex for single-model chat and escalates to the PERP swarm without user intervention.
+
+**Detection triggers:**
+- Multiple distinct phases: research + analysis + creation
+- URL + creation intent (browse X then write Y)
+- Multi-output markers ("write an article", "create a report")
+- Post-exhaustion: 3+ tool rounds used with no content produced
+
+```
+You > write an article comparing Kognisant to other AI systems
+⚡ gemma4:latest | valence: +12 | 15 skills, 6 tools
+📋 AUTONOMOUS -> delegating to agent swarm
+  Multi-phase task detected: research + analysis + creation
+
+  🐝 Delegating to agent swarm...
+  [Running in background - /status to monitor, /stop to cancel]
+```
+
+The user stays at the chat prompt and can continue chatting while the swarm works in the background. On completion, artifacts are listed with their file paths.
+
+---
+
+## Background Daemon and Job Scheduling
 
 A forked POSIX daemon that runs work without an open terminal.
 
@@ -281,7 +373,7 @@ kognisant daemon status     # PID, uptime, active jobs
 | Type | Behavior |
 |------|----------|
 | `persistent` | Always-on service. Restarts on crash. `exit(0)` means intentional stop. |
-| `scheduled` | Cron-based execution (UTC, 5-field format). Supports `*/15 * * * *`, ranges, steps. |
+| `scheduled` | Cron-based execution (UTC, 5-field format). |
 | `agent` | One-shot AI task dispatched to the PERP swarm. |
 
 ### Job Management
@@ -301,7 +393,7 @@ kognisant job remove <name>
 - Auto-recovery from `jobs.json.bak` on corruption
 - PID reuse detection prevents killing unrelated processes
 - Schema versioning with forward migration
-- Scheduler policies: `skip` (default) or `catchup_once` for clock jumps
+- Crash loop detection (5 restarts in 60s triggers cooldown)
 
 ---
 
@@ -314,24 +406,18 @@ The World Model is an opt-in subsystem that gives Kognisant deep understanding o
 ```bash
 # From chat:
 /worldmodel enable
-
-# Or manually in .kognisant/config.json:
-{"world_model_enabled": true}
 ```
 
 ### What It Does
 
-When enabled, the World Model:
-
-- **Traces every PERP execution** (tool calls, file ops, LLM calls) for observability
-- **Builds a dependency graph** via AST analysis (functions, classes, imports, call sites)
-- **Tracks confidence scores** on every piece of knowledge, with provenance (static analysis, dynamic trace, LLM inference, or user assertion)
-- **Detects code changes** via git and invalidates stale graph edges automatically
-- **Monitors test health** (rolling history, instability detection, recovery tracking)
-- **Generates improvement goals** from 6 strategies: contract violations, coverage gaps, decay alerts, complexity hotspots, stale artifacts, and repeated error patterns
-- **Ranks goals by priority** using impact radius, severity, likelihood, and effort estimation
-- **Learns from your feedback** to calibrate future suggestions (accept rate tracking with asymmetric weighting)
-- **Graduates autonomy** from "ask every time" to "auto-execute" as acceptance rates cross thresholds
+- Traces every PERP execution (tool calls, file ops, LLM calls)
+- Builds a dependency graph via AST analysis (functions, classes, imports)
+- Tracks confidence scores on every piece of knowledge with provenance
+- Detects code changes via git and invalidates stale graph edges
+- Monitors test health (rolling history, instability detection)
+- Generates improvement goals from 6 strategies
+- Learns from your feedback to calibrate future suggestions
+- Graduates autonomy from "ask every time" to "auto-execute"
 
 ### Goal Types
 
@@ -339,47 +425,43 @@ When enabled, the World Model:
 |------|----------------|
 | Contract Violation | Function call arguments don't match expected signature |
 | Coverage Gap | Module has 4+ untested branches |
-| Decay Alert | Knowledge about a module is going stale (many beliefs pruned) |
-| Complexity | Function too complex (cyclomatic > 15) with high churn or no tests |
+| Decay Alert | Knowledge about a module is going stale |
+| Complexity | Function too complex with high churn or no tests |
 | Stale Artifact | File unmodified 90+ days with low-confidence nodes |
 | Pattern Detection | Same error repeated 3+ times in recent executions |
 
-### Commands
+---
 
-```bash
-/worldmodel enable       # Enable and initialize
-/worldmodel disable      # Disable (preserves data)
-/worldmodel status       # Check current state
+## Model Pool and Selection
 
-/goals                   # List all active goals
-/goals accept <id>       # Accept and execute via PERP
-/goals dismiss <id>      # Dismiss (trains the learning loop)
+Kognisant maintains a pool of configured models with dynamically-learned capabilities:
+
+```json
+{
+  "name": "gemma4:latest",
+  "protocol": "ollama",
+  "api_base_url": "http://localhost:11434",
+  "capabilities": {
+    "tool_calling": true,
+    "reasoning": true
+  }
+}
 ```
 
-### Background Maintenance
+### Selection Logic
 
-When the daemon is running, three maintenance jobs execute automatically:
-- **Decay tick** (every 60 min) reduces confidence near changed code
-- **Static analysis** (on git HEAD change) refreshes the dependency graph
-- **Goal generation** (after each maintenance pass) checks for new issues
+- **Chat runtime**: Uses the user's active model. Circuit breakers auto-switch on repeated failures.
+- **Agent swarm planner**: Selects based on proven reasoning capability (true > unknown > false), sorted by reliability.
+- **Agent swarm workers**: Selects based on tool_calling capability.
+- **Cascading fallback**: If a model fails with 401/402/403/429/timeout, it is marked unreachable for the session and the next candidate is tried. The system never gives up until all models are exhausted.
 
-### Storage
+### Capability Detection
 
-```
-.kognisant/
-├── traces/                    # PERP execution traces
-├── world_model/
-│   ├── graph/                 # Dependency graph (sharded by module)
-│   ├── beliefs.json           # Confidence-tracked knowledge
-│   ├── contracts.json         # Interface contracts
-│   ├── epistemic_gaps.json    # Known unknowns
-│   ├── test_health.json       # Test pass/fail trends
-│   └── snapshots/             # Pre-execution rollback points
-└── goals/
-    ├── active.json            # Current goals
-    ├── completed.json         # Historical goals
-    └── learning.json          # Feedback signals
-```
+Capabilities are discovered dynamically:
+- First use of a model probes for reasoning (sends `think: true` for Ollama)
+- If thinking tokens arrive, `reasoning: true` is persisted
+- If no thinking tokens, `reasoning: false` is persisted
+- Subsequent requests skip probing and use the known capability
 
 ---
 
@@ -392,23 +474,24 @@ Available during `kognisant chat`:
 | `/help` | Show all commands |
 | `/clear` | Reset conversation (preserves system prompt) |
 | `/context` | Display project memory |
-| `/skills` | List loaded global skills |
-| `/model` | Switch model or add a new endpoint |
-| `/providers` | Inspect configured providers and API key status |
 | `/files` | List workspace files |
+| `/read <path>` | Load a file into conversation context |
+| `/model` | Switch model or add a new endpoint |
+| `/agent <task>` | Dispatch the PERP swarm |
+| `/telemetry` | Show execution stats (last 50 runs) |
+| `/telemetry <model>` | Per-model deep dive stats |
+| `/thinking` | Show reasoning for last turn |
+| `/thinking N` | Show reasoning for turn N |
+| `/thinking list` | Summary of all reasoning in this session |
 | `/goals` | List active World Model improvement goals |
 | `/goals accept <id>` | Accept a goal for automatic PERP execution |
 | `/goals dismiss <id>` | Dismiss a goal (records feedback for learning) |
-| `/read <path>` | Load a file into conversation context |
-| `/agent <task>` | Dispatch the PERP swarm |
-| `/daemon stop` | Stop the background daemon |
-| `/daemon restart` | Restart the daemon |
-| `/job stop` | Stop a running job |
-| `/job remove` | Remove a job |
-| `/job restart` | Restart a job |
-| `/worldmodel` | Check World Model status (enabled/disabled) |
-| `/worldmodel enable` | Enable the World Model and initialize storage |
-| `/worldmodel disable` | Disable the World Model |
+| `/daemon status` | Check daemon state |
+| `/jobs` | List all jobs |
+| `/job stop <name>` | Stop a running job |
+| `/worldmodel enable` | Enable the World Model |
+| `/paste` | Multi-line paste mode |
+| `/spec` | Manage Spec-Driven Development workflows |
 
 ---
 
@@ -424,18 +507,18 @@ Tools available to the AI during chat and agent execution:
 - `delete_project_path` - Remove files/directories
 - `list_project_files` - Full workspace file tree
 
-### Web & Research
-- `search_web` - Headless DuckDuckGo search (results returned in-chat)
-- `browse_web_page` - Fetch and clean any URL (headless Chrome/Brave with JS rendering, or urllib fallback)
+### Web and Research
+- `search_web` - Headless DuckDuckGo search
+- `browse_web_page` - Fetch and clean any URL (headless Chrome/Brave with JS rendering)
 - `open_in_native_browser` - Open URLs in your desktop browser
 - `capture_active_browser_console` - Read Chrome/Brave developer console logs
 
 ### Global Assets
-- `read_global_file` / `create_global_file` / `edit_global_file` - Manage skills and tools in `~/.kognisant_core/`
-- `create_script` / `read_script` / `edit_script` / `delete_script` / `list_scripts` - Script CRUD with atomic writes
+- `read_global_file` / `create_global_file` / `edit_global_file` - Manage skills and tools
+- `create_script` / `read_script` / `edit_script` / `delete_script` / `list_scripts` - Script CRUD
 
 ### Job Management
-- `schedule_job` / `cancel_job` / `remove_job` / `list_jobs` / `job_logs` - Full job lifecycle from within chat
+- `schedule_job` / `cancel_job` / `remove_job` / `list_jobs` / `job_logs` - Full job lifecycle
 
 ---
 
@@ -443,30 +526,26 @@ Tools available to the AI during chat and agent execution:
 
 ```text
 cli-kognisant/
-├── pyproject.toml                 # Build system & metadata
+├── pyproject.toml                 # Build system and metadata (zero dependencies)
 ├── README.md
 ├── install.sh                     # One-liner installer script
 ├── docs/
 │   ├── developer/                 # Technical docs for contributors
-│   │   ├── architecture.md
-│   │   ├── execution-engine.md
-│   │   ├── job-lifecycle.md
-│   │   ├── security.md
-│   │   ├── testing.md
-│   │   ├── cli-reference.md
-│   │   └── cron-scheduling.md
 │   └── user/                      # End-user documentation
-│       ├── user_manual.md
-│       └── user_journeys.md
 ├── cli_kognisant/
 │   ├── main.py                    # CLI entry point (argparse)
 │   ├── config.py                  # Memory, providers, global core init
-│   ├── chat.py                    # Interactive loop, slash commands, rollback
-│   ├── agents.py                  # PERP swarm orchestration
-│   ├── network.py                 # API client with retry & backoff
-│   ├── tools.py                   # Tool specs & execution sandbox
+│   ├── chat.py                    # Interactive loop, slash commands
+│   ├── runtime.py                 # 5-phase execution lifecycle orchestrator
+│   ├── fast_path_classifier.py    # Rule-based SIMPLE/CONTEXT/COMPLEX/AUTONOMOUS
+│   ├── self_model_engine.py       # Cognitive state, Bayesian reliability, circuit breakers
+│   ├── reflect_engine.py          # HOT/WARM/COLD reflection logic
+│   ├── telemetry.py               # Per-execution recording, rotation, /telemetry
+│   ├── agents.py                  # PERP swarm orchestration with cascading fallback
+│   ├── network.py                 # Streaming API client (thinking tokens, stall detection)
+│   ├── tools.py                   # Tool specs and execution sandbox
 │   ├── models.py                  # Shared dataclasses (Node, Edge, Goal, etc.)
-│   ├── observer.py                # Trace collection, static analysis, git change detection
+│   ├── observer.py                # Trace collection, static analysis, git detection
 │   ├── world_model.py             # Dependency graph, beliefs, contracts, maintenance
 │   ├── world_model_store.py       # JSON-sharded persistence with snapshots
 │   ├── goal_engine.py             # Goal generation, ranking, execution, learning
@@ -474,8 +553,8 @@ cli-kognisant/
 │   ├── jobs.py                    # Job queue, cron parser, atomic writes
 │   ├── scripts.py                 # Script CRUD with symlink containment
 │   ├── sdd.py                     # Spec-Driven Development
-│   └── colors.py                  # ANSI rendering, spinners, logo
-└── tests/                         # pytest suite
+│   └── colors.py                  # ANSI rendering, spinners, markdown rendering
+└── tests/                         # pytest suite (1000+ tests)
 ```
 
 ---
@@ -485,9 +564,10 @@ cli-kognisant/
 - **Sandbox enforcement** - All file operations resolve through `os.path.realpath` and are verified against the project root. No directory traversal, no symlink escapes.
 - **No temp/staging files** - Agents edit target files directly. No orphaned drafts.
 - **API key isolation** - Keys stored locally in `~/.kognisant_core/`, never hardcoded or leaked.
-- **Atomic writes** - Job state, scripts, and config use tempfile-then-rename patterns to prevent corruption.
-- **File permissions** - `jobs.json` and sensitive files protected with `chmod 600`.
+- **Atomic writes** - Job state, scripts, and config use tempfile-then-rename patterns.
+- **File permissions** - Sensitive files protected with `chmod 600`.
 - **Subprocess isolation** - Dynamic tools run as isolated subprocesses with captured stdout.
+- **Model config immutability** - The runtime never mutates the user's model configuration dict.
 
 ---
 
@@ -495,31 +575,33 @@ cli-kognisant/
 
 | Symptom | Resolution |
 |---------|-----------|
-| `Connection refused` on Ollama model | Start Ollama: `ollama serve` (default: `http://localhost:11434`) |
-| `API HTTP Error 401` | Replace placeholder API key via `/model` in chat |
+| `Connection refused` on Ollama | Start Ollama: `ollama serve` |
+| `API HTTP Error 401/402/403` | Replace API key via `/model`, or use a local model |
 | `No active project detected` | Run `kognisant init` in your project root |
-| Rollback / "API Transport Failure" | Transient network error. Session auto-reverts to checkpoint. Retry. |
+| Timeout on local model | Model is loading into memory (first request). Wait or use a smaller model. |
+| Empty response | Runtime retries 3 times automatically. If all fail, try `/model` to switch. |
+| Agent swarm planning failed | All cloud models exhausted. Ensure at least one local model is running. |
 | Python `SyntaxError` on launch | Requires Python 3.10+ |
 | Daemon won't start | POSIX only (Linux/macOS). Check `kognisant daemon status`. |
 
 ---
 
-## 📖 Developer Documentation
+## Developer Documentation
 
 In-depth technical documentation lives in [`docs/developer/`](docs/developer/):
 
 - [Architecture](docs/developer/architecture.md) - System design, module responsibilities, threading model
-- [Execution Engine](docs/developer/execution-engine.md) - Atomic writes, recovery, schema versioning, clock jump handling
+- [Execution Engine](docs/developer/execution-engine.md) - Atomic writes, recovery, schema versioning
 - [Job Lifecycle](docs/developer/job-lifecycle.md) - State machine, execution flows, graceful shutdown
 - [Security](docs/developer/security.md) - Containment, permissions, traversal protection
 - [Testing](docs/developer/testing.md) - Test structure, fixtures, coverage strategy
-- [CLI Reference](docs/developer/cli-reference.md) - Complete command reference with flags and exit codes
-- [Cron Scheduling](docs/developer/cron-scheduling.md) - Parser internals, UTC evaluation, clock jump handling
-- [World Model](docs/developer/world-model.md) - Dependency graph, goal engine, observer, graduated autonomy
+- [CLI Reference](docs/developer/cli-reference.md) - Complete command reference
+- [Cron Scheduling](docs/developer/cron-scheduling.md) - Parser internals, UTC evaluation
+- [World Model](docs/developer/world-model.md) - Dependency graph, goal engine, graduated autonomy
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, issues, and feature requests are welcome.
 
@@ -534,7 +616,7 @@ One rule: stay within the **Python 3.10+ standard library**. Zero external depen
 
 ## About
 
-Kognisant is a free, open-source project built by a developer in **Mogadishu, Somalia** 🇸🇴
+Kognisant is a free, open-source project built by a developer in **Mogadishu, Somalia**.
 
 It exists because AI tooling should be accessible, portable, and private. Not locked behind subscriptions, bloated dependency trees, or proprietary ecosystems.
 

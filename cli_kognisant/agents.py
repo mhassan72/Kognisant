@@ -10,6 +10,7 @@ from .colors import Colors, Spinner
 from .config import GLOBAL_CORE_DIR, load_spec_info, is_world_model_enabled, load_world_model
 from .network import query_model_api, query_model_api_raw
 from .observer import TraceCollector
+from .telemetry import estimate_tokens
 from .tools import execute_tool, load_global_tools
 
 logger = logging.getLogger(__name__)
@@ -506,12 +507,17 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             "success": success,
             "description": subtask["description"],
             "response": response_content,
+            "tool_calls_made": attempts,
+            "tokens_in": estimate_tokens(json.dumps(messages)),
+            "tokens_out": estimate_tokens(response_content),
         }
 
         with print_lock:
             if success:
+                tokens_in = results_dict[subtask_id]["tokens_in"]
+                tokens_out = results_dict[subtask_id]["tokens_out"]
                 print(
-                    f"  ✅ {Colors.GREEN}Agent [{subtask_id}] Completed:{Colors.RESET} Finished task: '{desc_display}'"
+                    f"  ✅ {Colors.GREEN}Agent [{subtask_id}] Completed:{Colors.RESET} Finished task: '{desc_display}' | {tokens_in} in / {tokens_out} out"
                 )
             else:
                 reason = (
@@ -1334,6 +1340,66 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
 
     spinner.stop()
     with print_lock:
+        # Print swarm completion summary with token breakdown
+        total_tokens_in = 0
+        total_tokens_out = 0
+        total_tool_calls = 0
+        artifacts = []
+
+        # Collect per-worker stats
+        worker_stats = []
+        for sid, result in sorted(results_dict.items()):
+            tokens_in = result.get("tokens_in", 0)
+            tokens_out = result.get("tokens_out", 0)
+            tool_calls = result.get("tool_calls_made", 0)
+            total_tokens_in += tokens_in
+            total_tokens_out += tokens_out
+            total_tool_calls += tool_calls
+            worker_stats.append({
+                "id": sid,
+                "description": result.get("description", "")[:40],
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "success": result.get("success", False),
+            })
+
+        # Collect artifacts (files created/modified by agents)
+        if project_info and project_info.get("root"):
+            try:
+                tc = project_info.get("_trace_collector")
+                sid_trace = project_info.get("_trace_session_id")
+                if tc and sid_trace and hasattr(tc, "get_file_ops"):
+                    file_ops = tc.get_file_ops(sid_trace)
+                    for op in file_ops:
+                        artifacts.append(op)
+            except Exception:
+                pass
+
+        print(f"\n  {Colors.BOLD}🐝 Swarm Complete ({len(results)} subtasks){Colors.RESET}")
+        print(f"  ┌{'─' * 72}┐")
+        print(f"  │ {'Token Usage':<70} │")
+        print(f"  ├{'─' * 72}┤")
+        for ws in worker_stats:
+            icon = "✓" if ws["success"] else "✗"
+            desc = ws["description"][:35]
+            line = f"    {icon} Worker {ws['id']}: {ws['tokens_in']:>6,} in / {ws['tokens_out']:>5,} out  ({desc})"
+            print(f"  │ {line:<70} │")
+        print(f"  ├{'─' * 72}┤")
+        total_line = f"    Total: {total_tokens_in:>6,} in / {total_tokens_out:>5,} out | {total_tool_calls} tool calls"
+        print(f"  │ {total_line:<70} │")
+
+        if artifacts:
+            print(f"  ├{'─' * 72}┤")
+            art_header = f"  📄 Artifacts ({len(artifacts)}):"
+            print(f"  │ {art_header:<70} │")
+            for art in artifacts[:10]:
+                action = art.get("action", "modified")
+                path = art.get("path", "unknown")[:55]
+                icon = "✓" if action in ("created", "write") else "~" if action in ("modified", "read") else "✗"
+                art_line = f"    {icon} {action:<10} {path}"
+                print(f"  │ {art_line:<70} │")
+
+        print(f"  └{'─' * 72}┘")
         print(
             f"\n  ✨ {Colors.BOLD}PERP Swarm Process Finished Successfully!{Colors.RESET}\n"
         )

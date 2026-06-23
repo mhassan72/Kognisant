@@ -204,6 +204,68 @@ def _save_thinking(ctx, thinking_text: str, thinking_duration_ms: float) -> None
 
 
 # ---------------------------------------------------------------------------
+# Autonomous Task Detection
+# ---------------------------------------------------------------------------
+
+_RESEARCH_VERBS = {"look", "browse", "fetch", "check", "explore", "research", "search", "find", "inspect"}
+_CREATION_VERBS = {"write", "create", "generate", "build", "make", "produce", "draft", "compose", "author"}
+_ANALYSIS_VERBS = {"compare", "analyze", "evaluate", "assess", "contrast", "benchmark"}
+
+_MULTI_OUTPUT_MARKERS = [
+    "then write", "then create", "and write", "and create",
+    "write an article", "write a report", "create a document",
+    "generate a report", "draft an article", "write a comparison",
+    "write a summary", "create a plan", "build a report",
+    "write documentation", "create documentation",
+]
+
+
+def _detect_autonomous(message: str) -> tuple[bool, str]:
+    """Detect if a COMPLEX message should escalate to agent/swarm mode.
+
+    Returns (should_escalate, reason).
+    """
+    words = message.lower().split()
+    lower_msg = message.lower()
+
+    # Count distinct action verb groups
+    has_research = bool(set(words) & _RESEARCH_VERBS)
+    has_creation = bool(set(words) & _CREATION_VERBS)
+    has_analysis = bool(set(words) & _ANALYSIS_VERBS)
+
+    distinct_phases = sum([has_research, has_creation, has_analysis])
+
+    # Rule 1: 2+ distinct phases (research + write, or analyze + create)
+    if distinct_phases >= 2:
+        phases = []
+        if has_research:
+            phases.append("research")
+        if has_analysis:
+            phases.append("analysis")
+        if has_creation:
+            phases.append("creation")
+        return (True, f"Multi-phase task detected: {' + '.join(phases)}")
+
+    # Rule 2: URL + creation intent
+    has_url = "http://" in message or "https://" in message
+    if has_url and has_creation:
+        return (True, "URL research + content creation")
+
+    # Rule 3: Explicit multi-output markers
+    for marker in _MULTI_OUTPUT_MARKERS:
+        if marker in lower_msg:
+            return (True, f"Multi-output pattern: '{marker}'")
+
+    # Rule 4: Very long compound instruction (50+ words with conjunctions)
+    if len(words) > 50:
+        conjunctions = sum(1 for w in words if w in ("and", "then", "also", "after", "next"))
+        if conjunctions >= 3:
+            return (True, "Long compound instruction with multiple steps")
+
+    return (False, "")
+
+
+# ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
 
@@ -525,6 +587,13 @@ def _plan(ctx: ExecutionContext) -> None:
     # Classify
     ctx.classification = classify(ctx.user_message)
 
+    # Check for AUTONOMOUS escalation (multi-step tasks that need agent swarm)
+    if ctx.classification == "COMPLEX":
+        should_escalate, escalation_reason = _detect_autonomous(ctx.user_message)
+        if should_escalate:
+            ctx.classification = "AUTONOMOUS"
+            ctx.switch_reason = escalation_reason
+
     # Build system prompt per classification
     if ctx.classification == "SIMPLE":
         ctx.system_prompt = "You are Kognisant, a helpful AI assistant. Respond naturally and concisely."
@@ -567,7 +636,10 @@ def _plan(ctx: ExecutionContext) -> None:
     cls_name = ctx.classification
     total = ctx.total_tokens_in
     if is_tty:
-        if ctx.classification == "COMPLEX":
+        if ctx.classification == "AUTONOMOUS":
+            print(f"📋 {_BOLD}{cls_name}{_RESET} → delegating to agent swarm")
+            print(f"  {ctx.switch_reason}")
+        elif ctx.classification == "COMPLEX":
             bd = ctx.token_breakdown
             breakdown = f"sys: {bd['system']} + tools: {bd['tools']} + hist: {bd['history']} + msg: {bd['user_message']}"
             print(f"📋 {_BOLD}{cls_name}{_RESET} → ~{total} tokens input ({breakdown})")
@@ -578,7 +650,11 @@ def _plan(ctx: ExecutionContext) -> None:
         else:
             print(f"📋 {_BOLD}{cls_name}{_RESET} → ~{total} tokens input")
     else:
-        print(f"📋 {cls_name} → ~{total} tokens input")
+        if ctx.classification == "AUTONOMOUS":
+            print(f"📋 {cls_name} -> delegating to agent swarm")
+            print(f"  {ctx.switch_reason}")
+        else:
+            print(f"📋 {cls_name} → ~{total} tokens input")
 
     ctx.phase_times["plan"] = (time.monotonic() - t0) * 1000
 
@@ -996,6 +1072,16 @@ def _execute(ctx: ExecutionContext) -> None:
             rel = SelfModelEngine._ensure_model_reliability(ctx.self_model, model_name)
             rel.capabilities["reasoning"] = reasoning_capable
 
+        # Post-exhaustion escalation: if we exhausted tool rounds without content, escalate
+        if not ctx.success and not ctx.cancelled and ctx.tool_calls_made >= 3 and not ctx.response.strip():
+            if is_tty:
+                print(f"\n  {Colors.YELLOW}⚠️  Task needs more steps than single-model chat allows.{Colors.RESET}")
+                print(f"  {Colors.CYAN}🐝 Auto-escalating to agent swarm...{Colors.RESET}\n")
+            else:
+                print(f"\n  Task needs more steps. Auto-escalating to agent swarm...\n")
+            _rollback(ctx)
+            _escalate_to_swarm(ctx)
+
     except KeyboardInterrupt:
         # Graceful cancellation - cancels entire retry sequence
         if spinner:
@@ -1029,6 +1115,37 @@ def _is_retryable_error(error_str: str) -> bool:
     if "tool" in lower or "function" in lower:
         return False
     return True
+
+
+def _escalate_to_swarm(ctx: ExecutionContext) -> None:
+    """Escalate an AUTONOMOUS task to the PERP agent swarm."""
+    is_tty = _is_tty()
+
+    try:
+        from .agents import perp_orchestrate
+        from .config import get_compiled_models
+
+        compiled_models = get_compiled_models()
+
+        if is_tty:
+            print(f"\n  {Colors.CYAN}🐝 Delegating to agent swarm...{Colors.RESET}")
+            print(f"  [Running in background - /status to monitor, /stop to cancel]\n")
+        else:
+            print("\n  Delegating to agent swarm...")
+            print("  [Running in background - /status to monitor, /stop to cancel]\n")
+
+        perp_orchestrate(ctx.user_message, ctx.project_info, compiled_models)
+
+        ctx.success = True
+        ctx.response = "(Agent swarm dispatched. Use /status to monitor progress.)"
+        ctx.streamed = False
+
+    except ImportError:
+        ctx.error = "Agent swarm module not available."
+        ctx.error_type = "api_error"
+    except Exception as e:
+        ctx.error = f"Failed to launch agent swarm: {str(e)[:80]}"
+        ctx.error_type = "api_error"
 
 
 def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
@@ -1405,11 +1522,15 @@ def execute_message(
         # Phase 2: Plan
         _plan(ctx)
 
-        # Phase 3: Execute
-        _execute(ctx)
+        # Phase 3: Execute (or escalate to agent swarm for AUTONOMOUS)
+        if ctx.classification == "AUTONOMOUS":
+            _escalate_to_swarm(ctx)
+        else:
+            _execute(ctx)
 
-        # Phase 4: Reflect
-        valence_delta = _reflect(ctx)
+        # Phase 4: Reflect (skip for AUTONOMOUS - swarm handles its own telemetry)
+        if ctx.classification != "AUTONOMOUS":
+            valence_delta = _reflect(ctx)
 
         # Phase 5: Persist
         _persist(ctx)

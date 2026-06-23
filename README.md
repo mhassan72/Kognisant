@@ -72,15 +72,15 @@ Done. I've replaced the session-based auth with JWT:
 
 | Feature | Kognisant | Claude Code | Codex CLI | Gemini CLI | Aider |
 |---------|-----------|-------------|-----------|------------|-------|
-| Persistent memory across sessions | Yes | No | No | No | Partial |
-| Works with any LLM | Yes | Claude only | OpenAI only | Gemini only | Multi-model |
-| Autonomous multi-agent execution | Yes | No | No | No | No |
-| Background daemon with job scheduling | Yes | No | No | No | No |
-| Self-building tools | Yes | No | No | No | No |
-| Codebase world model | Yes | No | No | No | No |
-| Zero dependencies | Yes | npm | pip | gcloud | pip |
-| Reasoning display (thinking tokens) | Yes | No | No | No | No |
-| Fully open source | Yes | No | Yes | No | Yes |
+| Persistent memory across sessions | ✓ | ✗ | ✗ | ✗ | Partial |
+| Works with any LLM | ✓ | Claude only | OpenAI only | Gemini only | Multi-model |
+| Autonomous multi-agent execution | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Background daemon with job scheduling | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Self-building tools | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Codebase world model | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Zero dependencies | ✓ | npm | pip | gcloud | pip |
+| Reasoning display (thinking tokens) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Fully open source | ✓ | ✗ | ✓ | ✗ | ✓ |
 
 ---
 

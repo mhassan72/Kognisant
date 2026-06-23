@@ -1127,6 +1127,10 @@ def _escalate_to_swarm(ctx: ExecutionContext) -> None:
 
         compiled_models = get_compiled_models()
 
+        # Pass active model name so swarm can prioritize it
+        if ctx.project_info:
+            ctx.project_info["_active_model_name"] = ctx.active_model.get("name", "")
+
         if is_tty:
             print(f"\n  {Colors.CYAN}🐝 Delegating to agent swarm...{Colors.RESET}")
             print(f"  [Running in background - /status to monitor, /stop to cancel]\n")

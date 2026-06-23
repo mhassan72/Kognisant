@@ -36,43 +36,150 @@ class SwarmController:
     resume_event.set()
 
 
-def get_best_models_pool(compiled_models):
-    """Identifies the best models in the pool for planning and tasks."""
-    planning_model = None
-    task_model = None
+def get_best_models_pool(compiled_models, active_model_name=None):
+    """Select planner and task models based on capabilities, not provider type.
 
-    # Sort models: Cloud models are prioritized for planning, local/mini for tasks
+    Priority for planner (needs reasoning):
+      1. Active model (if reasoning-capable, it's proven working)
+      2. Models with capabilities.reasoning == true, sorted by reliability
+      3. Models with unknown reasoning capability (worth trying)
+      4. Any reachable model (last resort)
+
+    Priority for task workers (needs tool_calling):
+      1. Models with capabilities.tool_calling == true
+      2. Any reachable model
+
+    Returns (planning_model, task_model).
+    """
+    if not compiled_models:
+        mock = {"name": "mock", "provider": "Offline", "api_base_url": ""}
+        return mock, mock
+
+    # Load self_model for learned capabilities
+    from .self_model_engine import SelfModelEngine
+    self_model = SelfModelEngine.load()
+
+    def _get_reasoning_capability(model):
+        """Check if model is reasoning-capable from pool config or learned state."""
+        # Check pool config first (user override)
+        caps = model.get("capabilities", {})
+        if "reasoning" in caps:
+            return caps["reasoning"]
+        # Check learned state from self_model
+        name = model.get("name", "")
+        rel = self_model.model_reliability.get(name)
+        if rel and "reasoning" in rel.capabilities:
+            return rel.capabilities["reasoning"]
+        return None  # Unknown
+
+    def _get_reliability(model):
+        """Get model reliability score from self_model (higher is better)."""
+        name = model.get("name", "")
+        rel = self_model.model_reliability.get(name)
+        if rel:
+            return rel.reliability
+        return 0.5  # Unknown default
+
+    def _is_session_reachable(model):
+        """Check if model hasn't failed with auth/payment errors this session."""
+        name = model.get("name", "")
+        return name not in _session_unreachable
+
+    # Categorize models
+    reasoning_true = []    # Proven reasoning capability
+    reasoning_unknown = [] # Not yet tested
+    reasoning_false = []   # Proven non-reasoning
+
     for model in compiled_models:
-        provider = model.get("provider", "")
-        name = model.get("name", "").lower()
-        api_key = model.get("api_key", "")
+        if not _is_session_reachable(model):
+            continue
+        cap = _get_reasoning_capability(model)
+        if cap is True:
+            reasoning_true.append(model)
+        elif cap is None:
+            reasoning_unknown.append(model)
+        else:
+            reasoning_false.append(model)
 
-        # A cloud model with a valid configured API key is perfect for planning
-        if provider != "Ollama (Local)" and api_key and "your-" not in api_key:
-            if "gpt-4" in name or "chat" in name or "kimi" in name:
-                planning_model = model
-            elif not task_model:
-                task_model = model
+    # Sort by reliability (highest first)
+    reasoning_true.sort(key=_get_reliability, reverse=True)
+    reasoning_unknown.sort(key=_get_reliability, reverse=True)
 
-        # Local model is fine as fallback task model
-        if provider == "Ollama (Local)" and not task_model:
-            task_model = model
+    # If active model is reasoning-capable and reachable, put it first
+    if active_model_name:
+        for model_list in [reasoning_true, reasoning_unknown]:
+            for i, m in enumerate(model_list):
+                if m.get("name") == active_model_name:
+                    # Move to front
+                    model_list.insert(0, model_list.pop(i))
+                    break
 
-    # Fallbacks if pool is unconfigured or empty
-    if not planning_model:
-        planning_model = (
-            compiled_models[0]
-            if compiled_models
-            else {"name": "mock", "provider": "Offline"}
-        )
-    if not task_model:
-        task_model = (
-            compiled_models[0]
-            if compiled_models
-            else {"name": "mock", "provider": "Offline"}
-        )
+    # Build planner candidates: reasoning_true > reasoning_unknown > any reachable
+    planner_candidates = reasoning_true + reasoning_unknown
+    if not planner_candidates:
+        # Last resort: use any reachable model even if reasoning: false
+        planner_candidates = reasoning_false
+
+    planning_model = planner_candidates[0] if planner_candidates else compiled_models[0]
+
+    # Task model: prefer tool_calling capable, any reachable model
+    task_candidates = [m for m in compiled_models if _is_session_reachable(m)]
+    tool_capable = [m for m in task_candidates
+                    if m.get("capabilities", {}).get("tool_calling", True)]
+    task_model = tool_capable[0] if tool_capable else (task_candidates[0] if task_candidates else compiled_models[0])
 
     return planning_model, task_model
+
+
+# Session-level unreachable tracking (in-memory, resets on restart)
+_session_unreachable: set = set()
+
+
+def _mark_session_unreachable(model_name: str):
+    """Mark a model as unreachable for this session (auth/payment/rate failures)."""
+    _session_unreachable.add(model_name)
+
+
+def _get_planner_candidates(compiled_models, active_model_name=None):
+    """Get ordered list of planner candidate models for cascading fallback."""
+    from .self_model_engine import SelfModelEngine
+    self_model = SelfModelEngine.load()
+
+    candidates = []
+    for model in compiled_models:
+        name = model.get("name", "")
+        if name in _session_unreachable:
+            continue
+
+        # Check reasoning capability
+        caps = model.get("capabilities", {})
+        reasoning = caps.get("reasoning")
+        if reasoning is None:
+            rel = self_model.model_reliability.get(name)
+            if rel and "reasoning" in rel.capabilities:
+                reasoning = rel.capabilities["reasoning"]
+
+        # Skip models proven non-reasoning
+        if reasoning is False:
+            continue
+
+        # Get reliability for sorting
+        rel = self_model.model_reliability.get(name)
+        reliability = rel.reliability if rel else 0.5
+
+        candidates.append((model, reasoning, reliability))
+
+    # Sort: reasoning=True first, then by reliability descending
+    candidates.sort(key=lambda x: (x[1] is not True, -x[2]))
+
+    # If active model is in the list, move it to front
+    if active_model_name:
+        for i, (m, _, _) in enumerate(candidates):
+            if m.get("name") == active_model_name:
+                candidates.insert(0, candidates.pop(i))
+                break
+
+    return [m for m, _, _ in candidates]
 
 
 def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_id):
@@ -567,7 +674,10 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
         planning_model = {"name": "mock", "provider": "Offline", "api_base_url": ""}
         task_model = {"name": "mock", "provider": "Offline", "api_base_url": ""}
     else:
-        planning_model, task_model = get_best_models_pool(compiled_models)
+        planning_model, task_model = get_best_models_pool(
+            compiled_models,
+            active_model_name=project_info.get("_active_model_name") if project_info else None,
+        )
 
     # SDD (Spec-Driven Development) Auto-Detection
     spec_info = None
@@ -724,15 +834,56 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 ],
             }
         else:
-            plan_llm_start = time.time()
-            plan_content = query_model_api(
-                planning_model["api_base_url"],
-                planning_model.get("api_key", ""),
-                planning_model["name"],
-                [{"role": "user", "content": plan_prompt}],
-                protocol=planning_model.get("protocol", "openai"),
-            ).strip()
-            plan_llm_duration_ms = int((time.time() - plan_llm_start) * 1000)
+            # Cascading fallback: try each planner candidate until one works
+            planner_candidates = _get_planner_candidates(compiled_models)
+            plan_content = None
+            plan_llm_duration_ms = 0
+
+            for candidate_model in planner_candidates:
+                try:
+                    plan_llm_start = time.time()
+                    plan_content = query_model_api(
+                        candidate_model["api_base_url"],
+                        candidate_model.get("api_key", ""),
+                        candidate_model["name"],
+                        [{"role": "user", "content": plan_prompt}],
+                        protocol=candidate_model.get("protocol", "openai"),
+                    ).strip()
+                    plan_llm_duration_ms = int((time.time() - plan_llm_start) * 1000)
+
+                    if plan_content:
+                        # Success - update planning_model reference
+                        planning_model = candidate_model
+                        with print_lock:
+                            print(
+                                f"  📋 Planner: {Colors.CYAN}{candidate_model['name']}{Colors.RESET}"
+                            )
+                            sys.stdout.flush()
+                        break
+                except Exception as e:
+                    err_str = str(e)
+                    # Auth/payment/rate errors - mark unreachable and try next
+                    if "402" in err_str or "401" in err_str or "429" in err_str:
+                        _mark_session_unreachable(candidate_model.get("name", ""))
+                        with print_lock:
+                            print(
+                                f"  ⚠️  {Colors.YELLOW}{candidate_model['name']}: {err_str[:60]}. Trying next...{Colors.RESET}"
+                            )
+                            sys.stdout.flush()
+                        continue
+                    elif "timeout" in err_str.lower() or "timed out" in err_str.lower():
+                        _mark_session_unreachable(candidate_model.get("name", ""))
+                        with print_lock:
+                            print(
+                                f"  ⚠️  {Colors.YELLOW}{candidate_model['name']}: timeout. Trying next...{Colors.RESET}"
+                            )
+                            sys.stdout.flush()
+                        continue
+                    else:
+                        raise  # Unknown error, propagate
+
+            if not plan_content:
+                raise Exception("All models in pool are unreachable or returned empty plans")
 
             # Trace: record planning LLM call
             try:

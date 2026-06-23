@@ -199,6 +199,7 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
 
     # Parse SSE stream (or raw JSON for Ollama)
     content_parts = []
+    thinking_parts = []
     tool_calls_accumulated = []
     assistant_role = "assistant"
     usage_data = None
@@ -221,9 +222,14 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
                 if "usage" in chunk and chunk["usage"]:
                     usage_data = chunk["usage"]
 
-                # Ollama format: {"message": {"role": "assistant", "content": "..."}, "done": false}
+                # Ollama format: {"message": {"role": "assistant", "content": "...", "thinking": "..."}, "done": false}
                 if "message" in chunk:
                     msg = chunk["message"]
+                    # Thinking/reasoning tokens (Ollama uses "thinking" field)
+                    if "thinking" in msg and msg["thinking"]:
+                        thinking_parts.append(msg["thinking"])
+                        yield ("thinking", msg["thinking"])
+                    # Content tokens
                     if "content" in msg and msg["content"]:
                         content_parts.append(msg["content"])
                         yield ("content", msg["content"])
@@ -260,6 +266,14 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
             if "choices" in chunk and len(chunk["choices"]) > 0:
                 delta = chunk["choices"][0].get("delta", {})
 
+                # Thinking/reasoning tokens (DeepSeek: reasoning_content, generic: thinking)
+                if "reasoning_content" in delta and delta["reasoning_content"]:
+                    thinking_parts.append(delta["reasoning_content"])
+                    yield ("thinking", delta["reasoning_content"])
+                elif "thinking" in delta and delta["thinking"]:
+                    thinking_parts.append(delta["thinking"])
+                    yield ("thinking", delta["thinking"])
+
                 # Content token
                 if "content" in delta and delta["content"]:
                     content_parts.append(delta["content"])
@@ -287,6 +301,9 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
             # Handle Ollama native streaming format (fallback for OpenAI-compat endpoints)
             elif "message" in chunk:
                 msg = chunk["message"]
+                if "thinking" in msg and msg["thinking"]:
+                    thinking_parts.append(msg["thinking"])
+                    yield ("thinking", msg["thinking"])
                 if "content" in msg and msg["content"]:
                     content_parts.append(msg["content"])
                     yield ("content", msg["content"])
@@ -300,7 +317,11 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
 
     # Assemble final message
     full_content = "".join(content_parts)
+    full_thinking = "".join(thinking_parts)
     assistant_message = {"role": assistant_role, "content": full_content}
+
+    if full_thinking:
+        assistant_message["_thinking"] = full_thinking
 
     if tool_calls_accumulated:
         assistant_message["tool_calls"] = tool_calls_accumulated

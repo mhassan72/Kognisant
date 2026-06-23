@@ -1132,7 +1132,84 @@ def process_slash_commands(
             print(format_telemetry_summary(records))
         return True
 
+    elif cmd == "/thinking":
+        _handle_thinking_command(parts, project_info, session_file if 'session_file' in dir() else None)
+        return True
+
     return False
+
+
+def _handle_thinking_command(parts: list, project_info: dict | None, session_file: str | None):
+    """Handle /thinking, /thinking N, /thinking list commands."""
+    import json as _json
+    import os as _os
+    import glob as _glob
+
+    # Find the most recent thinking file
+    if project_info:
+        history_dir = _os.path.join(project_info.get("root", ""), ".kognisant", "history")
+    else:
+        history_dir = _os.path.expanduser("~/.kognisant_core/history")
+
+    # Find thinking files
+    thinking_files = sorted(_glob.glob(_os.path.join(history_dir, "*_thinking.json")))
+    if not thinking_files:
+        print(f"  {Colors.YELLOW}No reasoning data for this session.{Colors.RESET}")
+        return
+
+    # Use the most recent one
+    thinking_path = thinking_files[-1]
+    try:
+        with open(thinking_path, "r", encoding="utf-8") as f:
+            entries = _json.load(f)
+    except (IOError, _json.JSONDecodeError):
+        print(f"  {Colors.YELLOW}Could not read reasoning data.{Colors.RESET}")
+        return
+
+    if not entries:
+        print(f"  {Colors.YELLOW}No reasoning entries recorded yet.{Colors.RESET}")
+        return
+
+    sub_cmd = parts[1] if len(parts) > 1 else None
+
+    if sub_cmd == "list":
+        # Show summary: turn numbers + first 50 chars
+        print(f"\n  {Colors.BOLD}Reasoning history:{Colors.RESET}")
+        for entry in entries:
+            turn = entry.get("turn", "?")
+            reasoning = entry.get("reasoning", [])
+            preview = reasoning[0][:50] if reasoning else "(empty)"
+            duration = entry.get("thinking_duration_ms", 0) / 1000
+            print(f"    Turn {turn} ({duration:.1f}s): \"{preview}...\"")
+        print()
+        return
+
+    if sub_cmd and sub_cmd.isdigit():
+        # Show specific turn
+        turn_num = int(sub_cmd)
+        entry = next((e for e in entries if e.get("turn") == turn_num), None)
+        if not entry:
+            print(f"  {Colors.YELLOW}No reasoning recorded for turn {turn_num}.{Colors.RESET}")
+            return
+    else:
+        # Show last turn
+        entry = entries[-1]
+
+    # Display the entry
+    turn = entry.get("turn", "?")
+    model = entry.get("model", "unknown")
+    duration_ms = entry.get("thinking_duration_ms", 0)
+    reasoning = entry.get("reasoning", [])
+
+    print(f"\n  {Colors.BOLD}Turn {turn}{Colors.RESET} - Thought for {duration_ms/1000:.1f}s ({model})")
+    if len(reasoning) > 1:
+        for i, step in enumerate(reasoning, 1):
+            print(f"    {i}. {step}")
+    elif reasoning:
+        print(f"    {reasoning[0]}")
+    else:
+        print(f"    (no reasoning steps recorded)")
+    print()
 
 
 def run_mock_chat(project_info=None):

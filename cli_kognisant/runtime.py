@@ -57,6 +57,150 @@ _GREEN = "\033[38;2;39;174;96m"
 _RED = "\033[38;2;231;76;60m"
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
+_DIM = "\033[2m"
+
+
+# ---------------------------------------------------------------------------
+# Local Model Detection and Health Check
+# ---------------------------------------------------------------------------
+
+def _is_local_model(model_config: dict) -> bool:
+    """Check if a model is local (Ollama or llama.cpp)."""
+    protocol = model_config.get("protocol", "openai")
+    return protocol in ("ollama", "llama_cpp")
+
+
+def _check_local_health(model_config: dict) -> tuple[bool, str]:
+    """Pre-flight health check for local model services.
+
+    Returns (healthy, error_message). Completes in <2s.
+    """
+    import urllib.request
+    import urllib.error
+
+    protocol = model_config.get("protocol", "openai")
+    api_base = model_config.get("api_base_url", "").rstrip("/")
+
+    if protocol == "ollama":
+        # Ollama: GET /api/tags should respond quickly
+        health_url = api_base.replace("/api/chat", "").rstrip("/") + "/api/tags"
+    elif protocol == "llama_cpp":
+        health_url = api_base.replace("/v1/chat/completions", "").replace("/completion", "").rstrip("/") + "/health"
+    else:
+        return (True, "")
+
+    try:
+        req = urllib.request.Request(health_url, method="GET")
+        urllib.request.urlopen(req, timeout=2.0)
+        return (True, "")
+    except urllib.error.URLError:
+        if protocol == "ollama":
+            return (False, "Ollama is not running. Start it with: ollama serve")
+        else:
+            return (False, "llama.cpp server is not reachable. Ensure it is running.")
+    except Exception:
+        return (False, "Local model service not reachable.")
+
+
+# ---------------------------------------------------------------------------
+# Thinking/Reasoning Step Parser
+# ---------------------------------------------------------------------------
+
+import re
+
+_NUMBERED_STEP_PATTERN = re.compile(r"^\s*(\d+)\.\s+", re.MULTILINE)
+_BULLET_STEP_PATTERN = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
+
+
+def _parse_reasoning_steps(raw_thinking: str) -> list[str]:
+    """Parse raw thinking text into structured reasoning steps.
+
+    Priority:
+    1. Numbered patterns (1. 2. 3.) - split by those
+    2. Bullet patterns (- or *) - split by those
+    3. Newline-separated blocks - split by double newlines or single newlines
+    4. Fallback: return the raw string as a single-element list
+    """
+    if not raw_thinking or not raw_thinking.strip():
+        return []
+
+    text = raw_thinking.strip()
+
+    # 1. Check for numbered patterns
+    numbered_matches = list(_NUMBERED_STEP_PATTERN.finditer(text))
+    if len(numbered_matches) >= 2:
+        steps = []
+        for i, match in enumerate(numbered_matches):
+            start = match.end()
+            end = numbered_matches[i + 1].start() if i + 1 < len(numbered_matches) else len(text)
+            step_text = text[start:end].strip()
+            if step_text:
+                steps.append(step_text)
+        if steps:
+            return steps
+
+    # 2. Check for bullet patterns
+    bullet_matches = list(_BULLET_STEP_PATTERN.finditer(text))
+    if len(bullet_matches) >= 2:
+        steps = []
+        for i, match in enumerate(bullet_matches):
+            start = match.end()
+            end = bullet_matches[i + 1].start() if i + 1 < len(bullet_matches) else len(text)
+            step_text = text[start:end].strip()
+            if step_text:
+                steps.append(step_text)
+        if steps:
+            return steps
+
+    # 3. Newline-separated blocks
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) >= 2:
+        return lines
+
+    # 4. Fallback: single string
+    return [text]
+
+
+def _save_thinking(ctx, thinking_text: str, thinking_duration_ms: float) -> None:
+    """Save thinking to the session's thinking file."""
+    if not thinking_text or not ctx.session_file:
+        return
+
+    try:
+        reasoning_steps = _parse_reasoning_steps(thinking_text)
+        turn_number = len([m for m in ctx.messages if m.get("role") == "user"])
+
+        entry = {
+            "turn": turn_number,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "model": ctx.active_model.get("name", "unknown"),
+            "user_message": ctx.user_message[:200],
+            "thinking_duration_ms": round(thinking_duration_ms),
+            "reasoning": reasoning_steps,
+        }
+
+        # Determine thinking file path
+        thinking_file = ctx.session_file.replace(".json", "_thinking.json")
+        if ctx.project_info:
+            history_dir = os.path.join(ctx.project_info.get("root", ""), ".kognisant", "history")
+        else:
+            history_dir = os.path.expanduser("~/.kognisant_core/history")
+
+        os.makedirs(history_dir, exist_ok=True)
+        thinking_path = os.path.join(history_dir, thinking_file)
+
+        # Load existing entries or create new
+        entries = []
+        if os.path.exists(thinking_path):
+            with open(thinking_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+
+        entries.append(entry)
+
+        with open(thinking_path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass  # Never interrupt execution for thinking storage
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +465,19 @@ def _bootstrap(ctx: ExecutionContext) -> None:
     project_path = ctx.project_info.get("root") if ctx.project_info else None
     ctx.capability_snapshot = SelfModelEngine.scan_capabilities(project_path)
 
+    # Health check for local models (pre-flight, once per session)
+    if _is_local_model(ctx.active_model):
+        healthy, health_error = _check_local_health(ctx.active_model)
+        if not healthy:
+            ctx.error = f"⚠️  {health_error}"
+            ctx.error_type = "api_error"
+            if is_tty:
+                print(f"⚡ {Colors.RED}{health_error}{Colors.RESET}")
+            else:
+                print(f"⚡ {health_error}")
+            ctx.phase_times["bootstrap"] = (time.monotonic() - t0) * 1000
+            return
+
     # Determine first-run
     first_run = ctx.self_model.total_executions == 0
 
@@ -378,6 +535,15 @@ def _plan(ctx: ExecutionContext) -> None:
     else:  # COMPLEX
         ctx.system_prompt = _build_complex_prompt(ctx)
         ctx.timeout = 120
+
+    # Adaptive timeouts: local models get extended timeouts for loading + thinking
+    if _is_local_model(ctx.active_model):
+        if ctx.classification == "SIMPLE":
+            ctx.timeout = 120
+        elif ctx.classification == "CONTEXT":
+            ctx.timeout = 180
+        else:
+            ctx.timeout = 300
 
     # Build api_messages with appropriate window
     ctx.api_messages = _build_api_messages(ctx)
@@ -522,7 +688,7 @@ def _build_api_messages(ctx: ExecutionContext) -> list[dict]:
 
 
 def _execute(ctx: ExecutionContext) -> None:
-    """Phase 3: Stream LLM response, handle tool loop (max 3 rounds)."""
+    """Phase 3: Stream LLM response with retry, thinking display, and tool loop."""
     t0 = time.monotonic()
     is_tty = _is_tty()
 
@@ -538,208 +704,300 @@ def _execute(ctx: ExecutionContext) -> None:
     api_base = ctx.active_model.get("api_base_url", "")
     api_key = ctx.active_model.get("api_key", "")
     protocol = ctx.active_model.get("protocol", "openai")
+    is_local = _is_local_model(ctx.active_model)
 
-    max_rounds = 3
+    # Check if model supports reasoning (from persisted capabilities)
+    model_rel = ctx.self_model.model_reliability.get(model_name)
+    reasoning_capable = None  # None = unknown, try with thinking
+    if model_rel and "reasoning" in model_rel.capabilities:
+        reasoning_capable = model_rel.capabilities["reasoning"]
+
+    max_tool_rounds = 3
     current_round = 0
     tool_tokens_accumulated = 0
+    spinner = None
+
+    # Retry configuration: 3 attempts for timeouts/empty responses
+    max_attempts = 3
 
     try:
-        while current_round < max_rounds:
-            current_round += 1
+        for attempt in range(1, max_attempts + 1):
+            # Calculate timeout for this attempt
+            attempt_timeout = ctx.timeout
+            if attempt == 2:
+                attempt_timeout = ctx.timeout * 2
+            elif attempt == 3:
+                attempt_timeout = 300 if is_local else 120
 
-            # Build payload
-            payload = {
-                "model": model_name,
-                "messages": ctx.api_messages,
-                "stream": True,
-            }
-            if ctx.tools:
-                payload["tools"] = ctx.tools
+            # Show retry indicator
+            if attempt > 1:
+                retry_msg = f"Retry {attempt}/{max_attempts}..."
+                if attempt == 3:
+                    retry_msg = f"Retry {attempt}/{max_attempts} (extended timeout)..."
+                if is_tty:
+                    print(f"  {Colors.YELLOW}{retry_msg}{Colors.RESET}")
+                else:
+                    print(f"  {retry_msg}")
+                # Delay for remote models (rate limiting)
+                if not is_local:
+                    time.sleep(2)
 
-            # Start spinner
-            round_info = ""
-            if current_round > 1:
-                round_info = f" (round {current_round}, +{tool_tokens_accumulated:,} tokens from tools)"
+            # Reset state for this attempt
+            current_round = 0
+            ctx.response = ""
+            ctx.streamed = False
+            attempt_success = False
+            attempt_error = None
 
-            spinner_msg = f"⚙️  {display_name} — connecting...{round_info}" if is_tty else f"⚙️  {display_name} — connecting..."
-            spinner = None
-            if is_tty:
-                spinner = Spinner(message=spinner_msg, show_elapsed=True, timeout=ctx.timeout)
-                spinner.start()
-            else:
-                print(spinner_msg)
+            # Inner tool loop (max 3 rounds per attempt)
+            while current_round < max_tool_rounds:
+                current_round += 1
 
-            # Stream
-            content_parts = []
-            tool_calls = None
-            assistant_message = None
-            first_content = True
-            sub_state = "connecting"
+                # Build payload
+                payload = {
+                    "model": model_name,
+                    "messages": ctx.api_messages,
+                    "stream": True,
+                }
+                if ctx.tools:
+                    payload["tools"] = ctx.tools
 
-            try:
-                for chunk_type, data in query_model_api_stream(
-                    api_base, api_key, payload, protocol=protocol, timeout=ctx.timeout
-                ):
-                    if chunk_type == "phase" and data == "connected":
-                        sub_state = "thinking"
-                        if spinner:
-                            spinner.update_message(f"⚙️  {display_name} — thinking...{round_info}")
+                # Add thinking flag for reasoning-capable local models
+                if is_local and reasoning_capable is not False:
+                    if protocol == "ollama":
+                        payload["think"] = True
 
-                    elif chunk_type == "content":
-                        if first_content:
-                            sub_state = "streaming"
+                # Start spinner
+                round_info = ""
+                if current_round > 1:
+                    round_info = f" (round {current_round}, +{tool_tokens_accumulated:,} tokens from tools)"
+
+                # Choose initial spinner state based on model type
+                if is_local:
+                    initial_state = "loading model..."
+                else:
+                    initial_state = "connecting..."
+
+                spinner_msg = f"⚙️  {display_name} - {initial_state}{round_info}" if is_tty else f"⚙️  {display_name} - {initial_state}"
+                spinner = None
+                if is_tty:
+                    spinner = Spinner(message=spinner_msg, show_elapsed=True, timeout=attempt_timeout)
+                    spinner.start()
+                else:
+                    print(spinner_msg)
+
+                # Stream
+                content_parts = []
+                thinking_parts = []
+                tool_calls = None
+                assistant_message = None
+                first_content = True
+                first_thinking = True
+                sub_state = "connecting"
+                thinking_start_time = None
+
+                try:
+                    for chunk_type, data in query_model_api_stream(
+                        api_base, api_key, payload, protocol=protocol, timeout=attempt_timeout
+                    ):
+                        if chunk_type == "phase" and data == "connected":
+                            sub_state = "thinking"
                             if spinner:
-                                spinner.stop()
-                                spinner = None
-                            # Print response header
+                                if is_local:
+                                    spinner.update_message(f"⚙️  {display_name} - waiting for response...{round_info}")
+                                else:
+                                    spinner.update_message(f"⚙️  {display_name} - thinking...{round_info}")
+
+                        elif chunk_type == "thinking":
+                            # Thinking tokens arriving - model is alive
+                            if first_thinking:
+                                first_thinking = False
+                                thinking_start_time = time.monotonic()
+                                sub_state = "thinking"
+                                if spinner:
+                                    spinner.stop()
+                                    spinner = None
+                                # Print thinking header
+                                if is_tty:
+                                    sys.stdout.write(f"{_DIM}💭 Thinking...{_RESET}\n")
+                                else:
+                                    print("[THINKING]")
+                                # Mark reasoning capability as detected
+                                if reasoning_capable is None:
+                                    reasoning_capable = True
+                            # Stream thinking tokens in dim
                             if is_tty:
-                                print(f"{Colors.CYAN}Kognisant >{Colors.RESET}")
+                                sys.stdout.write(f"{_DIM}{data}{_RESET}")
                             else:
-                                print("Kognisant >")
-                            first_content = False
-                            ctx.streamed = True
-                        # Stream content to terminal
-                        sys.stdout.write(data)
-                        sys.stdout.flush()
-                        content_parts.append(data)
+                                sys.stdout.write(data)
+                            sys.stdout.flush()
+                            thinking_parts.append(data)
 
-                    elif chunk_type == "tool_calls":
-                        tool_calls = data
+                        elif chunk_type == "content":
+                            if first_content:
+                                sub_state = "streaming"
+                                if spinner:
+                                    spinner.stop()
+                                    spinner = None
+                                # If we were showing thinking, close it and show duration
+                                if thinking_parts:
+                                    thinking_duration = time.monotonic() - (thinking_start_time or t0)
+                                    if is_tty:
+                                        sys.stdout.write(f"\n{_DIM}💭 Thought for {thinking_duration:.1f}s{_RESET}\n\n")
+                                    else:
+                                        sys.stdout.write(f"\n[THOUGHT for {thinking_duration:.1f}s]\n\n")
+                                    sys.stdout.flush()
+                                # Print response header
+                                if is_tty:
+                                    print(f"{Colors.CYAN}Kognisant >{Colors.RESET}")
+                                else:
+                                    print("Kognisant >")
+                                first_content = False
+                                ctx.streamed = True
+                            # Stream content to terminal
+                            sys.stdout.write(data)
+                            sys.stdout.flush()
+                            content_parts.append(data)
 
-                    elif chunk_type == "done":
-                        assistant_message = data
+                        elif chunk_type == "tool_calls":
+                            tool_calls = data
 
-            except KognisantAPIError as e:
-                if spinner:
-                    spinner.stop()
-                error_str = str(e)
-                _handle_api_error(ctx, error_str, sub_state)
-                return
+                        elif chunk_type == "done":
+                            assistant_message = data
 
-            finally:
-                if spinner:
-                    spinner.stop()
+                except KognisantAPIError as e:
+                    if spinner:
+                        spinner.stop()
+                        spinner = None
+                    error_str = str(e)
+                    # Check if this is a retryable error
+                    if _is_retryable_error(error_str) and attempt < max_attempts:
+                        attempt_error = error_str
+                        # Rollback this attempt's messages
+                        while len(ctx.messages) > ctx.checkpoint_idx + 1:
+                            ctx.messages.pop()
+                        break  # Break tool loop, continue retry loop
+                    else:
+                        _handle_api_error(ctx, error_str, sub_state)
+                        return
 
-            # Newline after streamed content
-            if content_parts and ctx.streamed:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                finally:
+                    if spinner:
+                        spinner.stop()
+                        spinner = None
 
-            # Record response
-            full_content = "".join(content_parts)
-            if not ctx.response:
-                ctx.response = full_content
-            else:
-                ctx.response += full_content
+                # Newline after streamed content
+                if content_parts and ctx.streamed:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
 
-            # Handle token calibration from _usage (R11.6)
-            if assistant_message and assistant_message.get("_usage"):
-                usage = assistant_message["_usage"]
-                actual_in = usage.get("prompt_tokens", 0)
-                if actual_in and ctx.total_tokens_in:
-                    SelfModelEngine.update_token_calibration(
-                        ctx.self_model, model_name, actual_in, ctx.total_tokens_in
+                # If thinking arrived but no content yet and we hit this point
+                if thinking_parts and not content_parts and not tool_calls:
+                    # Model thought but produced no content - close thinking display
+                    if thinking_start_time:
+                        thinking_duration = time.monotonic() - thinking_start_time
+                        if is_tty and first_content:
+                            sys.stdout.write(f"\n{_DIM}💭 Thought for {thinking_duration:.1f}s{_RESET}\n")
+                            sys.stdout.flush()
+
+                # Save thinking to file
+                if thinking_parts:
+                    raw_thinking = "".join(thinking_parts)
+                    thinking_dur = (time.monotonic() - (thinking_start_time or t0)) * 1000
+                    _save_thinking(ctx, raw_thinking, thinking_dur)
+
+                # Record response
+                full_content = "".join(content_parts)
+                if not ctx.response:
+                    ctx.response = full_content
+                else:
+                    ctx.response += full_content
+
+                # Handle token calibration from _usage
+                if assistant_message and assistant_message.get("_usage"):
+                    usage = assistant_message["_usage"]
+                    actual_in = usage.get("prompt_tokens", 0)
+                    if actual_in and ctx.total_tokens_in:
+                        SelfModelEngine.update_token_calibration(
+                            ctx.self_model, model_name, actual_in, ctx.total_tokens_in
+                        )
+                    ctx.total_tokens_out = usage.get("completion_tokens", 0)
+                else:
+                    ctx.total_tokens_out += estimate_tokens(full_content)
+
+                # Append assistant message to messages
+                if assistant_message:
+                    clean_msg = {k: v for k, v in assistant_message.items()
+                                 if k not in ("_usage", "_thinking")}
+                    # Add thinking reference
+                    if thinking_parts:
+                        turn_num = len([m for m in ctx.messages if m.get("role") == "user"])
+                        clean_msg["_thinking_turn"] = turn_num
+                    ctx.messages.append(clean_msg)
+                    ctx.api_messages.append(clean_msg)
+                    _save_session_safe(ctx)
+
+                # Check for tool calls
+                if tool_calls:
+                    if ctx.classification in ("SIMPLE", "CONTEXT"):
+                        attempt_success = True
+                        break
+
+                    tool_results = _execute_tools(ctx, tool_calls, is_tty)
+                    tool_tokens_accumulated += sum(
+                        estimate_tokens(r.get("content", "")) for r in tool_results
                     )
-                ctx.total_tokens_out = usage.get("completion_tokens", 0)
-            else:
-                ctx.total_tokens_out += estimate_tokens(full_content)
 
-            # Append assistant message to messages
-            if assistant_message:
-                # Clean _usage before persisting
-                clean_msg = {k: v for k, v in assistant_message.items() if k != "_usage"}
-                ctx.messages.append(clean_msg)
-                ctx.api_messages.append(clean_msg)
-                _save_session_safe(ctx)
+                    for tr in tool_results:
+                        ctx.messages.append(tr)
+                        ctx.api_messages.append(tr)
+                        _save_session_safe(ctx)
 
-            # Check for tool calls
-            if tool_calls:
-                # R3.7: Ignore unexpected tool calls in SIMPLE/CONTEXT
-                if ctx.classification in ("SIMPLE", "CONTEXT"):
-                    # Ignore tool calls, log in telemetry
-                    ctx.success = True
+                    # Reset thinking for next round
+                    thinking_parts = []
+                    first_thinking = True
+                    continue
+                else:
+                    attempt_success = True
                     break
 
-                # Execute tools
-                tool_results = _execute_tools(ctx, tool_calls, is_tty)
-                tool_tokens_accumulated += sum(
-                    estimate_tokens(r.get("content", "")) for r in tool_results
-                )
-
-                # Append tool results to messages and api_messages
-                for tr in tool_results:
-                    ctx.messages.append(tr)
-                    ctx.api_messages.append(tr)
-                    _save_session_safe(ctx)  # R11.5: save after each tool result
-
-                # Continue loop for next LLM round
-                continue
-            else:
-                # No tool calls — we're done
+            # Check if this attempt succeeded
+            if attempt_success and ctx.response.strip():
                 ctx.success = True
                 break
-
-        # Check for empty response — retry with non-streaming fallback
-        if ctx.success and not ctx.response.strip():
-            if is_tty:
-                print(f"\n{Colors.YELLOW}⚠️  Empty streaming response — retrying without streaming...{Colors.RESET}")
-            else:
-                print(f"\n⚠️  Empty streaming response — retrying without streaming...")
-
-            # Rollback the empty assistant message we just appended
-            while len(ctx.messages) > ctx.checkpoint_idx + 1:  # keep user msg
-                ctx.messages.pop()
-            while len(ctx.api_messages) > len(ctx.api_messages) - 1:
-                break
-
-            # Rebuild api_messages for retry
-            retry_messages = list(ctx.api_messages)
-            retry_payload = {
-                "model": model_name,
-                "messages": retry_messages,
-                "stream": False,
-            }
-            if ctx.tools:
-                retry_payload["tools"] = ctx.tools
-
-            try:
-                resp = query_model_api_raw(api_base, api_key, retry_payload, protocol=protocol)
-                if resp and "choices" in resp and resp["choices"]:
-                    retry_content = resp["choices"][0].get("message", {}).get("content", "")
-                    if retry_content and retry_content.strip():
-                        ctx.response = retry_content
-                        ctx.streamed = False
-                        ctx.success = True
-                        msg = {"role": "assistant", "content": retry_content}
-                        ctx.messages.append(msg)
-                        _save_session_safe(ctx)
+            elif attempt_success and not ctx.response.strip():
+                # Empty response - retry if attempts remain
+                if attempt < max_attempts:
+                    if is_tty:
+                        print(f"  {Colors.YELLOW}⚠️  Empty response, retrying...{Colors.RESET}")
                     else:
-                        ctx.success = False
-                        ctx.error = "⚠️  Model returned empty response (both streaming and non-streaming). Try /model to switch."
-                        ctx.error_type = "empty"
-                        if is_tty:
-                            print(f"{Colors.YELLOW}{ctx.error}{Colors.RESET}")
-                        else:
-                            print(ctx.error)
+                        print(f"  ⚠️  Empty response, retrying...")
+                    # Rollback this attempt
+                    while len(ctx.messages) > ctx.checkpoint_idx + 1:
+                        ctx.messages.pop()
+                    continue
                 else:
                     ctx.success = False
-                    ctx.error = "⚠️  Model returned empty response. Try /model to switch."
+                    ctx.error = "⚠️  Model returned empty response after 3 attempts. Try /model to switch."
                     ctx.error_type = "empty"
                     if is_tty:
-                        print(f"{Colors.YELLOW}{ctx.error}{Colors.RESET}")
+                        print(f"\n{Colors.YELLOW}{ctx.error}{Colors.RESET}")
                     else:
-                        print(ctx.error)
-            except (KognisantAPIError, Exception) as e:
-                ctx.success = False
-                ctx.error = f"⚠️  Retry also failed: {str(e)[:80]}. Try /model to switch."
-                ctx.error_type = "empty"
-                if is_tty:
-                    print(f"{Colors.YELLOW}{ctx.error}{Colors.RESET}")
-                else:
-                    print(ctx.error)
+                        print(f"\n{ctx.error}")
+                    break
+            elif attempt_error:
+                # Retryable error occurred, continue to next attempt
+                continue
+            else:
+                break
+
+        # Persist reasoning capability detection
+        if reasoning_capable is not None:
+            rel = SelfModelEngine._ensure_model_reliability(ctx.self_model, model_name)
+            rel.capabilities["reasoning"] = reasoning_capable
 
     except KeyboardInterrupt:
-        # Graceful cancellation (R3.5)
+        # Graceful cancellation - cancels entire retry sequence
         if spinner:
             spinner.stop()
         ctx.cancelled = True
@@ -753,6 +1011,24 @@ def _execute(ctx: ExecutionContext) -> None:
 
     ctx.response_time = time.monotonic() - t0
     ctx.phase_times["execute"] = ctx.response_time * 1000
+
+
+def _is_retryable_error(error_str: str) -> bool:
+    """Check if an API error should trigger a retry."""
+    lower = error_str.lower()
+    # Retryable: timeouts, stalls, empty responses, generic connection issues
+    if "timeout" in lower or "timed out" in lower:
+        return True
+    if "stall" in lower:
+        return True
+    if "connection" in lower and "refused" not in lower:
+        return True
+    # NOT retryable: auth errors, payment, rate limiting, tool detection
+    if "401" in error_str or "402" in error_str or "429" in error_str:
+        return False
+    if "tool" in lower or "function" in lower:
+        return False
+    return True
 
 
 def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
@@ -1106,6 +1382,25 @@ def execute_message(
     try:
         # Phase 1: Bootstrap
         _bootstrap(ctx)
+
+        # Early exit if bootstrap failed (e.g. local service not running)
+        if ctx.error:
+            model_name = ctx.active_model.get("name", model_config.get("name", "unknown"))
+            return ExecutionResult(
+                success=False,
+                response="",
+                streamed=False,
+                error=ctx.error,
+                classification="",
+                model_used=model_name,
+                response_time=0.0,
+                tool_calls_made=0,
+                valence_delta=0,
+                timed_out=False,
+                cancelled=False,
+                tokens_in=0,
+                tokens_out=0,
+            )
 
         # Phase 2: Plan
         _plan(ctx)

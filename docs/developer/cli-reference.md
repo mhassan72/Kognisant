@@ -408,7 +408,7 @@ Error: not_found - No log file found for job 'my-job'. Job may not have been exe
 | `/clear` | Clear conversation history (preserves system prompt) |
 | `/context` | Display local Membrain (context.md) |
 | `/skills` | List loaded global skills |
-| `/model` | Switch active model or add custom endpoint |
+| `/model` | Switch active model, add new endpoint, or remove model from pool |
 | `/providers` | Inspect provider configs and API key status |
 | `/files` | List indexed workspace files |
 | `/read <path>` | Load file into conversation context |

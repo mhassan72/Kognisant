@@ -153,6 +153,47 @@ This is useful when:
 
 ---
 
+## Removing Models
+
+Inside a chat session:
+
+```
+/model
+```
+
+Select `r` to remove a model from your pool:
+
+```
+📦 Kognisant Model Pool Wizard:
+
+  [1] gemma4:latest (Ollama) 🟢 [Active]
+  [2] Kimi-K2.6 (Nebius Cloud) 🟢
+  [3] GPT OSS 120b (Groq) 🟢
+  [a] Add custom provider / model
+  [r] Remove a model from pool
+  [Enter] Cancel and resume chat
+
+👉 Enter selection: r
+
+🗑️  Remove a model:
+
+  [1] gemma4:latest (Ollama) [Active - cannot remove]
+  [2] Kimi-K2.6 (Nebius Cloud)
+  [3] GPT OSS 120b (Groq)
+  [Enter] Cancel
+
+👉 Enter number to remove: 2
+Remove 'Kimi-K2.6' (Nebius Cloud)? [y/N]: y
+✅ 'Kimi-K2.6' removed from model pool.
+```
+
+Rules:
+- You cannot remove the currently active model. Switch to another one first.
+- Removal is permanent (the model is deleted from `models_pool.json`).
+- You can always re-add a model later using the `[a]` add option.
+
+---
+
 ## Local vs. Cloud Model Differences
 
 ### Timeouts

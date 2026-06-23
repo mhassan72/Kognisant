@@ -98,7 +98,7 @@ You can read multiple files by calling `/read` multiple times. Each file is adde
 
 ### /model
 
-Open the interactive model selection menu. Switch between configured models or add a new one.
+Open the interactive model selection menu. Switch between configured models, add a new one, or remove an existing one.
 
 ```
 /model
@@ -112,9 +112,13 @@ Shows:
   [2] llama-3.3-70b-versatile (Groq) 🟢 [Active]
   [3] gpt-4o-mini (OpenAI) 🟡
   [a] Add custom provider / model
+  [r] Remove a model from pool
 ```
 
-Select a number to switch instantly, or press `a` to add a new provider.
+Options:
+- Select a number to switch instantly
+- Press `a` to add a new provider
+- Press `r` to remove a model (cannot remove the active model)
 
 ### /providers
 
@@ -415,7 +419,7 @@ quit
 | `/context` | | View project memory |
 | `/files` | | List project files |
 | `/read` | `<path>` | Load file into context |
-| `/model` | | Switch or add models |
+| `/model` | | Switch, add, or remove models |
 | `/providers` | | View provider details |
 | `/agent` | `<task>` | Deploy autonomous swarm |
 | `/status` | | Check agent progress |

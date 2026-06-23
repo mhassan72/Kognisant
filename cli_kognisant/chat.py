@@ -1397,6 +1397,7 @@ def select_model(
             f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({Colors.MAGENTA}{provider_name}{Colors.RESET}) {health}{is_active}"
         )
     print(f"    [{Colors.GREEN}a{Colors.RESET}] Add custom provider / model")
+    print(f"    [{Colors.RED}r{Colors.RESET}] Remove a model from pool")
     print("    [Enter] Cancel and resume chat\n")
 
     while True:
@@ -1412,6 +1413,68 @@ def select_model(
 
         if choice.lower() == "m":
             return "mock"
+
+        if choice.lower() == "r":
+            # Remove a model from the pool
+            print(f"\n  🗑️  {Colors.BOLD}Remove a model:{Colors.RESET}\n")
+            for idx, model in enumerate(models, 1):
+                display_name = model.get("display_name", model["name"])
+                provider_name = model.get("provider", "Unknown")
+                is_active = (
+                    f" {Colors.RED}[Active - cannot remove]{Colors.RESET}"
+                    if active_model_config
+                    and model["name"] == active_model_config["name"]
+                    and model["provider"] == active_model_config["provider"]
+                    else ""
+                )
+                print(f"    [{Colors.CYAN}{idx}{Colors.RESET}] {display_name} ({provider_name}){is_active}")
+            print(f"    [Enter] Cancel\n")
+
+            try:
+                rm_choice = input(f"  👉 {Colors.BOLD}Enter number to remove: {Colors.RESET}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
+
+            if not rm_choice:
+                continue
+
+            try:
+                rm_idx = int(rm_choice) - 1
+                if 0 <= rm_idx < len(models):
+                    target = models[rm_idx]
+                    # Prevent removing the active model
+                    if (
+                        active_model_config
+                        and target["name"] == active_model_config["name"]
+                        and target["provider"] == active_model_config["provider"]
+                    ):
+                        print(f"  {Colors.RED}Cannot remove the active model. Switch first with /model.{Colors.RESET}\n")
+                        continue
+
+                    display_name = target.get("display_name", target["name"])
+                    provider_name = target.get("provider", "Unknown")
+
+                    # Confirm
+                    try:
+                        confirm = input(f"  Remove '{display_name}' ({provider_name})? [y/N]: ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        return None
+
+                    if confirm == "y":
+                        models.pop(rm_idx)
+                        # Save updated pool
+                        from .config import save_providers_and_pool
+                        providers_data = load_providers_and_pool()
+                        providers_data["models"] = models
+                        save_providers_and_pool(providers_data)
+                        print(f"  ✅ {Colors.GREEN}'{display_name}' removed from model pool.{Colors.RESET}\n")
+                    else:
+                        print(f"  Cancelled.\n")
+                else:
+                    print(f"  {Colors.RED}Invalid selection.{Colors.RESET}\n")
+            except ValueError:
+                print(f"  {Colors.RED}Invalid input.{Colors.RESET}\n")
+            continue
 
         if choice.lower() == "a":
             # Template-based provider addition

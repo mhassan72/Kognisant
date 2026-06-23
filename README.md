@@ -242,7 +242,7 @@ kognisant job add       # Schedule a job
 | Command | What It Does |
 |---------|-------------|
 | `/help` | All commands |
-| `/model` | Switch or add models |
+| `/model` | Switch, add, or remove models |
 | `/agent <task>` | Dispatch autonomous agent swarm |
 | `/read <path>` | Load file into context |
 | `/files` | List project files |

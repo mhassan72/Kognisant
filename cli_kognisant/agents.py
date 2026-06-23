@@ -862,8 +862,8 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                         break
                 except Exception as e:
                     err_str = str(e)
-                    # Auth/payment/rate errors - mark unreachable and try next
-                    if "402" in err_str or "401" in err_str or "429" in err_str:
+                    # Auth/payment/rate/access errors - mark unreachable and try next
+                    if any(code in err_str for code in ("401", "402", "403", "429")):
                         _mark_session_unreachable(candidate_model.get("name", ""))
                         with print_lock:
                             print(
@@ -876,6 +876,14 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                         with print_lock:
                             print(
                                 f"  ⚠️  {Colors.YELLOW}{candidate_model['name']}: timeout. Trying next...{Colors.RESET}"
+                            )
+                            sys.stdout.flush()
+                        continue
+                    elif "connection" in err_str.lower() or "urlerror" in err_str.lower():
+                        _mark_session_unreachable(candidate_model.get("name", ""))
+                        with print_lock:
+                            print(
+                                f"  ⚠️  {Colors.YELLOW}{candidate_model['name']}: unreachable. Trying next...{Colors.RESET}"
                             )
                             sys.stdout.flush()
                         continue

@@ -68,6 +68,60 @@ Done. I've replaced the session-based auth with JWT:
 
 ---
 
+## Channels — Remote AI + Social Media Management
+
+Access Kognisant from anywhere. Manage your project's social presence autonomously.
+
+```bash
+# Set up a Telegram bot to reach your Kognisant remotely
+$ kognisant channel add my-bot --platform telegram --mode hybrid --owner-id "tg:123456"
+$ kognisant channel set-credentials my-bot
+$ kognisant channel start my-bot
+```
+
+Now message your bot from your phone — full AI with project context, tools, and agents:
+
+```
+You (Telegram): what's failing in the tests?
+
+Kognisant: 2 failures in test_token_expiry.py:
+  - test_refresh_expired: timezone-naive comparison on line 42
+  - test_validate_stale: off-by-one in TTL check
+
+You: /agent fix both
+
+Kognisant: 🐝 PERP Swarm Activated (2 subtasks)
+  ✅ Agent [1]: Fixed timezone comparison
+  ✅ Agent [2]: Fixed TTL off-by-one
+✨ Done. All 14 tests passing.
+```
+
+**Two modes on one channel:**
+
+| Your DMs (owner) | Public messages (everyone else) |
+|-------------------|---------------------------------|
+| Full AI assistant — tools, agents, file ops | Brand bot — persona voice, templates, moderation |
+| Direct `chat.py` pipeline | `manager_respond()` — zero tools, isolated |
+| Instant response | Queued with priority + deadlines |
+
+**Architecture:**
+- Adapters are standalone scripts in isolated virtualenvs (use any library)
+- IPC via Unix domain sockets (length-prefixed binary, protocol v1.0)
+- Credentials encrypted with AES-256-GCM, decrypted by core, injected as env vars
+- Bidirectional heartbeat monitoring (adapter ↔ daemon)
+- Supported platforms: Telegram (shipped), X/Twitter, Discord, Reddit (roadmap)
+
+```bash
+$ kognisant channel list
+
+  Channels:
+
+    ● running   my-bot (telegram, hybrid)
+    ○ stopped   brand-x (x, manager)
+```
+
+---
+
 ## Install
 
 ```bash

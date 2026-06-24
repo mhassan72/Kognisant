@@ -920,34 +920,43 @@ Chat slash commands:
 
 **Goal**: Message Kognisant from Telegram, get full AI responses with tools.
 
-- [ ] `channels.py`: `ChannelManager`, `ChannelRouter`, config schema
-- [ ] UDS server: create/listen/accept per channel, `select.poll()` multiplexing
-- [ ] Protocol v1.0: length-prefixed binary, `hello`/`hello_ack` handshake
-- [ ] Bidirectional heartbeat (seq numbers, 3-miss detection)
-- [ ] Config delivery via temp file + env var
-- [ ] Credential encryption (tiered: `cryptography` → OS keyring → obfuscated)
-- [ ] Core decrypts → env var injection at adapter spawn
-- [ ] Reference Telegram adapter (`python-telegram-bot`)
-- [ ] Adapter venv auto-setup (create venv, install requirements)
-- [ ] Owner auth (sender_id matching)
-- [ ] Integration with `chat.py` (inject message → full tools → return response)
-- [ ] Response formatting for Telegram (markdown, 4096 char splitting)
-- [ ] Register channel as persistent job
-- [ ] Session auth (optional PIN, 8h timeout)
-- [ ] Action confirmation (challenge-response for destructive ops)
-- [ ] CLI: `channel add/remove/list/start/stop/set-credentials/lockdown`
-- [ ] Chat: `/channels`, `/channel status`
-- [ ] Audit logging
+**Status: ✅ IMPLEMENTED** (core infrastructure complete, pending venv auto-setup + end-to-end test with live bot)
+
+- [x] `channels.py`: `ChannelManager`, `ChannelRouter`, config schema
+- [x] UDS server: create/listen/accept per channel, `select.poll()` multiplexing
+- [x] Protocol v1.0: length-prefixed binary, `hello`/`hello_ack` handshake
+- [x] Bidirectional heartbeat (seq numbers, 3-miss detection)
+- [x] Config delivery via temp file + env var
+- [x] Credential encryption (tiered: `cryptography` → OS keyring → hard failure)
+- [x] Core decrypts → env var injection at adapter spawn
+- [x] Reference Telegram adapter (`python-telegram-bot`)
+- [ ] Adapter venv auto-setup (create venv, install requirements automatically)
+- [x] Owner auth (sender_id matching)
+- [x] Integration with `chat.py` (inject message → full tools → return response)
+- [x] Response formatting for Telegram (markdown, 4096 char splitting)
+- [x] Register channel as persistent job
+- [x] Session auth (optional PIN, 8h timeout, inactivity timeout)
+- [x] Action confirmation (challenge-response for destructive ops)
+- [x] CLI: `channel add/remove/list/status/start/stop/set-credentials/lockdown/revoke-sessions/logs/test`
+- [x] Chat: `/channels`, `/channel status/start/stop/pause/escalations/metrics`
+- [x] Audit logging (append-only JSONL per channel)
+- [x] Daemon integration (`ChannelDaemonService.poll()` wired into `_main_loop`)
+- [x] Graceful shutdown (adapter SIGTERM + daemon cleanup on exit)
+
+**Remaining for Phase 1 completion:**
+- [ ] Adapter venv auto-setup (`python -m venv` + `pip install` on first `channel start`)
+- [ ] End-to-end test with live Telegram bot token
+- [ ] Handle adapter crash-loop detection (reuse existing persistent job logic)
 
 **Phase 1 build order** (dependency chain):
-1. UDS server + protocol v1.0 (foundation — everything depends on this)
-2. ChannelManager + config schema (CRUD, locking, validation)
-3. Credential encryption (hard failure without `cryptography` or OS keyring)
-4. Reference Telegram adapter (venv setup, env var injection)
-5. Owner auth + chat.py injection (the core value prop)
-6. Session tokens + action confirmation (security layers 2-3)
-7. Audit logging + `/lockdown` (security layers 5-6)
-8. CLI commands + response formatting (UX polish)
+1. ~~UDS server + protocol v1.0~~ ✅
+2. ~~ChannelManager + config schema~~ ✅
+3. ~~Credential encryption~~ ✅
+4. ~~Reference Telegram adapter~~ ✅
+5. ~~Owner auth + chat.py injection~~ ✅
+6. ~~Session tokens + action confirmation~~ ✅
+7. ~~Audit logging + `/lockdown`~~ ✅
+8. ~~CLI commands + response formatting~~ ✅
 
 ### Phase 2a: SMM Foundation — 6 weeks
 

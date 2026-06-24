@@ -68,28 +68,6 @@ Done. I've replaced the session-based auth with JWT:
 
 ---
 
-## How It Compares
-
-| Feature | Kognisant | Claude Code | Codex CLI | Gemini CLI | Aider |
-|---------|-----------|-------------|-----------|------------|-------|
-| Persistent memory across sessions | ✅ | ❌ | ❌ | ❌ | Partial |
-| Works with any LLM (local or cloud) | ✅ | Claude only | OpenAI only | Gemini only | Multi-model |
-| Multi-agent swarm execution | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Auto-detects when to use agents | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Background job scheduling (cron, persistent services) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| AI creates and schedules executable scripts | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Self-building tools (creates new capabilities on demand) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Codebase world model with dependency graph | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Goal engine (auto-generates improvement suggestions) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Graduated autonomy (learns what to do automatically) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Spec-Driven Development (requirements > design > tasks) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Self-healing model selection (circuit breakers, auto-switch) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Execution telemetry and observability | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Zero external dependencies | ✅ | npm | pip | gcloud | pip |
-| Fully open source | ✅ | ❌ | ✅ | ❌ | ✅ |
-
----
-
 ## Install
 
 ```bash

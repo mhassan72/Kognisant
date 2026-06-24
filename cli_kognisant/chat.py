@@ -259,6 +259,7 @@ def process_slash_commands(
         print(f"  {Colors.BOLD}Power Tools{Colors.RESET}   /agent <task>  /spec  /tool")
         print(f"  {Colors.BOLD}Daemon{Colors.RESET}        /daemon status|start|stop|restart")
         print(f"  {Colors.BOLD}Jobs{Colors.RESET}          /jobs  /job stop|logs|restart|remove <name>")
+        print(f"  {Colors.BOLD}Channels{Colors.RESET}      /channels  /channel status|start|stop|pause|escalations <name>")
         print(f"  {Colors.BOLD}Goals{Colors.RESET}         /goals  /goals accept|dismiss <id>")
         print(f"  {Colors.BOLD}World Model{Colors.RESET}   /worldmodel [enable|disable|status]")
         print(f"  {Colors.BOLD}Telemetry{Colors.RESET}     /telemetry [model_name]")
@@ -996,6 +997,132 @@ def process_slash_commands(
 
         else:
             print(f"  {Colors.YELLOW}Unknown subcommand '{subcmd}'. Usage: /job stop|logs|restart|remove <name>{Colors.RESET}\n")
+            return True
+
+    elif cmd == "/channels":
+        # List all channels with status
+        from .channels import ChannelManager
+        manager = ChannelManager()
+        channels = manager.list_channels()
+
+        if not channels:
+            print(f"  {Colors.YELLOW}No channels configured.{Colors.RESET}")
+            print(f"  Create one: kognisant channel add <name> --platform <platform>\n")
+            return True
+
+        print(f"\n  {Colors.BOLD}{'Name':<20} {'Platform':<12} {'Mode':<10} {'State':<10}{Colors.RESET}")
+        print(f"  {'─' * 52}")
+        for ch in channels:
+            name = ch.get("name", "?")
+            platform = ch.get("platform", "?")
+            mode = ch.get("mode", "?")
+            state = ch.get("state", "stopped")
+
+            if state == "running":
+                state_display = f"{Colors.GREEN}{state}{Colors.RESET}"
+            elif state == "error":
+                state_display = f"{Colors.RED}{state}{Colors.RESET}"
+            elif state == "paused":
+                state_display = f"{Colors.YELLOW}{state}{Colors.RESET}"
+            else:
+                state_display = state
+
+            print(f"  {name:<20} {platform:<12} {mode:<10} {state_display}")
+        print()
+        return True
+
+    elif cmd == "/channel":
+        # Channel management: /channel status|start|stop|pause|metrics|escalations <name>
+        from .channels import ChannelManager
+        manager = ChannelManager()
+        parts = user_input.split(None, 2)  # /channel <subcmd> [name]
+
+        if len(parts) < 2:
+            print(f"  {Colors.YELLOW}Usage: /channel status|start|stop|pause|escalations <name>{Colors.RESET}\n")
+            return True
+
+        subcmd = parts[1].lower()
+        ch_name = parts[2].strip() if len(parts) > 2 else None
+
+        if subcmd == "status":
+            if not ch_name:
+                # Show all
+                channels = manager.list_channels()
+                for ch in channels:
+                    state = ch.get("state", "stopped")
+                    state_icon = "●" if state == "running" else "○"
+                    color = Colors.GREEN if state == "running" else Colors.RESET
+                    print(f"  {color}{state_icon}{Colors.RESET} {ch.get('name')} ({ch.get('platform')}, {ch.get('mode')}) — {state}")
+                print()
+            else:
+                ch = manager.get_channel(ch_name)
+                if not ch:
+                    print(f"  {Colors.RED}Channel '{ch_name}' not found.{Colors.RESET}\n")
+                else:
+                    print(f"\n  {Colors.BOLD}Channel: {ch['name']}{Colors.RESET}")
+                    print(f"  Platform:  {ch.get('platform')}")
+                    print(f"  Mode:      {ch.get('mode')}")
+                    print(f"  State:     {ch.get('state', 'stopped')}")
+                    print(f"  Owners:    {ch.get('owner_ids', [])}")
+                    print(f"  Created:   {ch.get('created_at', '?')}")
+                    if ch.get("mode") in ("manager", "hybrid"):
+                        mc = ch.get("manager_config", {})
+                        cg = mc.get("cost_gate", {})
+                        print(f"  LLM Budget: {cg.get('max_llm_calls_per_day', '?')}/day")
+                    print()
+            return True
+
+        elif subcmd == "start" and ch_name:
+            if manager.update_state(ch_name, "starting"):
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{ch_name}' queued for start.\n")
+            else:
+                print(f"  {Colors.RED}Channel '{ch_name}' not found.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "stop" and ch_name:
+            if manager.update_state(ch_name, "stopped"):
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{ch_name}' marked for stop.\n")
+            else:
+                print(f"  {Colors.RED}Channel '{ch_name}' not found.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "pause" and ch_name:
+            if manager.update_state(ch_name, "paused"):
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{ch_name}' paused.\n")
+            else:
+                print(f"  {Colors.RED}Channel '{ch_name}' not found.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "escalations":
+            from .channels import ESCALATIONS_FILE
+            if not os.path.exists(ESCALATIONS_FILE):
+                print(f"  {Colors.GREEN}No pending escalations.{Colors.RESET}\n")
+                return True
+            try:
+                with open(ESCALATIONS_FILE, "r") as f:
+                    lines = f.readlines()
+                pending = [json.loads(l) for l in lines if l.strip()]
+                pending = [e for e in pending if e.get("status") == "pending"]
+                if not pending:
+                    print(f"  {Colors.GREEN}No pending escalations.{Colors.RESET}\n")
+                else:
+                    print(f"\n  {Colors.BOLD}Pending Escalations ({len(pending)}):{Colors.RESET}\n")
+                    for i, esc in enumerate(pending[-10:], 1):
+                        ev = esc.get("event", {})
+                        print(f"  [{i}] {esc.get('channel', '?')} | @{ev.get('sender_name', '?')}: {ev.get('content', '')[:60]}")
+                        print(f"      {esc.get('ts', '')}")
+                    print()
+            except (OSError, json.JSONDecodeError):
+                print(f"  {Colors.RED}Failed to read escalations.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "metrics" and ch_name:
+            # Phase 2a — placeholder
+            print(f"  {Colors.YELLOW}Metrics for '{ch_name}' — available in Phase 2a.{Colors.RESET}\n")
+            return True
+
+        else:
+            print(f"  {Colors.YELLOW}Usage: /channel status|start|stop|pause|escalations|metrics <name>{Colors.RESET}\n")
             return True
 
     elif cmd == "/daemon":

@@ -1115,6 +1115,15 @@ def _main_loop():
         }
     logger.info("World model jobs registered for %d project(s) (R18.1)", len(wm_state))
 
+    # --- Channel service initialization ---
+    channel_service = None
+    try:
+        from .channel_daemon import ChannelDaemonService
+        channel_service = ChannelDaemonService()
+        logger.info("Channel service initialized")
+    except Exception as e:
+        logger.warning("Channel service failed to initialize: %s", e)
+
     # Clock jump detection (Requirement 11): use monotonic clock
     POLL_INTERVAL = 15  # seconds
     _last_tick = time.monotonic()
@@ -1855,6 +1864,13 @@ def _main_loop():
         except Exception as e:
             logger.error("Error in polling cycle: %s", e)
 
+        # --- Channel service poll (manage adapters, route events) ---
+        if channel_service:
+            try:
+                channel_service.poll()
+            except Exception as e:
+                logger.error("Channel service poll error: %s", e)
+
         # --- Sleep for 15s polling interval with responsive shutdown/SIGHUP check ---
         # Check _shutdown_flag and _reload_flag every 500ms (Requirement 12)
         for _ in range(30):
@@ -1866,6 +1882,14 @@ def _main_loop():
 
     # --- Graceful shutdown sequence (R12-AC1,2,3,4) ---
     logger.info("Daemon shutting down gracefully (PID %d)", os.getpid())
+
+    # Shutdown channel adapters first
+    if channel_service:
+        try:
+            channel_service.shutdown_all()
+            logger.info("Channel adapters shut down")
+        except Exception as e:
+            logger.error("Channel shutdown error: %s", e)
 
     # Send SIGTERM to all running subprocesses (R12-AC2)
     all_pids = []

@@ -160,6 +160,26 @@ Manages user scripts in `~/.kognisant_core/scripts/`:
 - Script name validation
 - Symlink containment via `os.path.realpath()` check
 
+### `channels.py` - Channel System
+
+Remote AI access and social media management:
+- `ChannelManager`: CRUD for channel configs, atomic writes + file locking
+- `ChannelServer`: Per-channel Unix domain socket server with `select.poll()`
+- `ChannelProtocol`: Length-prefixed binary framing (4-byte header + JSON)
+- `ChannelRouter`: State machine routing (owner → assistant, public → manager)
+- `CredentialManager`: AES-256-GCM encryption, OS keyring fallback, hard failure
+- `SessionAuth`: PIN-based session tokens with timeout and inactivity expiry
+- `AuditLogger`: Append-only JSONL audit trail per channel
+- `ResponseFormatter`: Platform-aware message splitting
+
+### `channel_daemon.py` - Channel Daemon Integration
+
+Daemon-side channel management:
+- `ChannelDaemonService`: Spawns adapters, monitors heartbeats, routes events
+- Resolves adapter scripts (user scripts → bundled reference adapters)
+- Decrypts credentials → injects as env vars
+- Routes events through `ChannelRouter` → `chat.py` or `manager_respond()`
+
 ### `colors.py` - Terminal UI
 
 ANSI terminal rendering utilities:
@@ -335,6 +355,7 @@ ProcessManager.spawn(script_path, env, job_context, cwd):
 
 - [Execution Engine](execution-engine.md) - Atomic write and recovery internals
 - [Job Lifecycle](job-lifecycle.md) - State machine and execution flows
+- [Channels](channels.md) - UDS IPC, adapter protocol, routing, credential encryption
 - [Security](security.md) - Symlink containment and permission model
 - [CLI Reference](cli-reference.md) - All commands and flags
 - [World Model](world-model.md) - Goal generation, dependency graph, and observer subsystem

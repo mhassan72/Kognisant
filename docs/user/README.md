@@ -20,6 +20,7 @@ Welcome to the Kognisant user documentation. These guides cover every major feat
 | [Models and Providers](models-and-providers.md) | Multi-model support, switching, circuit breakers, reliability |
 | [Autonomous Agents](autonomous-agents.md) | PERP swarm, /agent command, monitoring, escalation |
 | [Background Daemon](background-daemon.md) | Daemon management, job types, cron scheduling |
+| [Channels](channels.md) | Remote AI access via messaging platforms + social media management |
 | [Tools and Skills](tools-and-skills.md) | Built-in tools, dynamic tool creation, custom skills |
 
 ### Advanced Features
@@ -64,6 +65,6 @@ Then explore the advanced features as needed.
 
 ## Quick Links
 
-- **CLI commands:** `kognisant init`, `kognisant chat`, `kognisant setup`, `kognisant status`, `kognisant spec`, `kognisant daemon`, `kognisant job`
+- **CLI commands:** `kognisant init`, `kognisant chat`, `kognisant setup`, `kognisant status`, `kognisant spec`, `kognisant daemon`, `kognisant job`, `kognisant channel`
 - **In-chat help:** type `/help` inside any session
 - **Developer docs:** see [`docs/developer/`](../developer/README.md) for internals and architecture

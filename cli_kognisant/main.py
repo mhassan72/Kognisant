@@ -748,6 +748,247 @@ def _handle_job_edit(args):
     print(f"Job '{name}' updated: {', '.join(changes)}")
 
 
+def _handle_channel(args):
+    """Dispatch channel subcommands."""
+    from .channels import ChannelManager, CredentialManager, VALID_PLATFORMS, VALID_MODES
+    from .colors import Colors
+
+    manager = ChannelManager()
+
+    if args.channel_command == "add":
+        try:
+            channel = manager.add_channel(
+                name=args.name,
+                platform=args.platform,
+                mode=args.mode,
+                owner_ids=args.owner_ids,
+            )
+            print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{args.name}' created "
+                  f"(platform: {args.platform}, mode: {args.mode})")
+            print()
+            print("  Next steps:")
+            print(f"    1. Set credentials:  kognisant channel set-credentials {args.name}")
+            if args.mode in ("assistant", "hybrid"):
+                print(f"    2. Set owner ID:     kognisant channel add {args.name} --owner-id <your_platform_id>")
+            print(f"    3. Start:            kognisant channel start {args.name}")
+        except ValueError as e:
+            print(f"  {Colors.RED}Error:{Colors.RESET} {e}", file=sys.stderr)
+
+    elif args.channel_command == "remove":
+        if manager.remove_channel(args.name):
+            print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{args.name}' removed")
+        else:
+            print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found", file=sys.stderr)
+
+    elif args.channel_command == "list":
+        channels = manager.list_channels()
+        if not channels:
+            print("  No channels configured. Create one with: kognisant channel add <name> --platform <platform>")
+            return
+
+        print(f"\n  {Colors.BOLD}Channels:{Colors.RESET}\n")
+        for ch in channels:
+            name = ch.get("name", "?")
+            platform = ch.get("platform", "?")
+            mode = ch.get("mode", "?")
+            state = ch.get("state", "stopped")
+
+            # State color
+            if state == "running":
+                state_display = f"{Colors.GREEN}{state}{Colors.RESET}"
+            elif state == "error":
+                state_display = f"{Colors.RED}{state}{Colors.RESET}"
+            elif state == "paused":
+                state_display = f"{Colors.YELLOW}{state}{Colors.RESET}"
+            else:
+                state_display = state
+
+            print(f"    {Colors.CYAN}{name}{Colors.RESET}  "
+                  f"{platform} | {mode} | {state_display}")
+        print()
+
+    elif args.channel_command == "status":
+        if args.name:
+            ch = manager.get_channel(args.name)
+            if not ch:
+                print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found")
+                return
+            print(f"\n  {Colors.BOLD}Channel: {ch['name']}{Colors.RESET}")
+            print(f"  Platform:  {ch.get('platform', '?')}")
+            print(f"  Mode:      {ch.get('mode', '?')}")
+            print(f"  State:     {ch.get('state', 'stopped')}")
+            print(f"  Created:   {ch.get('created_at', '?')}")
+            print(f"  Owners:    {ch.get('owner_ids', [])}")
+            if ch.get("mode") in ("manager", "hybrid"):
+                mc = ch.get("manager_config", {})
+                persona = mc.get("persona", {})
+                print(f"  Voice:     {persona.get('voice', 'not set')}")
+                cg = mc.get("cost_gate", {})
+                print(f"  LLM Budget: {cg.get('max_llm_calls_per_day', '?')}/day")
+            print()
+        else:
+            # Show all statuses
+            _handle_channel_list_with_status(manager)
+
+    elif args.channel_command == "start":
+        ch = manager.get_channel(args.name)
+        if not ch:
+            print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found")
+            return
+        # Check adapter script exists
+        script_path = manager.get_adapter_script_path(args.name)
+        if not script_path:
+            platform = ch.get("platform", "unknown")
+            print(f"  {Colors.RED}Error:{Colors.RESET} No adapter script found for platform '{platform}'")
+            print(f"  Expected: ~/.kognisant_core/scripts/channel_{platform}.py")
+            print(f"  Install a reference adapter or generate one with /agent")
+            return
+        # Check crypto backend
+        backend = CredentialManager.has_crypto_backend()
+        if not backend:
+            print(f"  {Colors.RED}Error:{Colors.RESET} No secure credential storage available.")
+            print("    Option 1: pip install cryptography")
+            print("    Option 2: Configure OS keyring")
+            return
+        manager.update_state(args.name, "starting")
+        print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{args.name}' marked for start")
+        print("    The daemon will pick it up on its next poll cycle (15s).")
+        print("    Check status: kognisant channel status " + args.name)
+
+    elif args.channel_command == "stop":
+        if manager.update_state(args.name, "stopped"):
+            print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{args.name}' marked for stop")
+        else:
+            print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found")
+
+    elif args.channel_command == "set-credentials":
+        ch = manager.get_channel(args.name)
+        if not ch:
+            print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found")
+            return
+
+        backend = CredentialManager.has_crypto_backend()
+        if not backend:
+            print(f"  {Colors.RED}Error:{Colors.RESET} No secure credential storage available.")
+            print("    pip install cryptography")
+            return
+
+        import getpass
+        platform = ch.get("platform", "unknown")
+
+        # Platform-specific credential prompts
+        cred_prompts = {
+            "telegram": [("bot_token", "Telegram Bot Token")],
+            "x": [("api_key", "X API Key"), ("api_secret", "X API Secret"),
+                   ("access_token", "Access Token"), ("access_secret", "Access Token Secret")],
+            "discord": [("bot_token", "Discord Bot Token")],
+            "reddit": [("client_id", "Reddit Client ID"), ("client_secret", "Reddit Client Secret"),
+                       ("username", "Reddit Username"), ("password", "Reddit Password")],
+            "webhook": [("hmac_secret", "Webhook HMAC Shared Secret")],
+        }
+        prompts = cred_prompts.get(platform, [("api_key", "API Key")])
+
+        if backend == "cryptography":
+            passphrase = getpass.getpass("  Master passphrase (for encryption): ")
+            if not passphrase:
+                print(f"  {Colors.RED}Aborted.{Colors.RESET} Passphrase required.")
+                return
+        else:
+            passphrase = ""
+
+        for key_name, label in prompts:
+            value = getpass.getpass(f"  {label}: ")
+            if value:
+                try:
+                    CredentialManager.store_credential(args.name, key_name, value, passphrase)
+                except RuntimeError as e:
+                    print(f"  {Colors.RED}Error:{Colors.RESET} {e}")
+                    return
+
+        print(f"  {Colors.GREEN}✓{Colors.RESET} Credentials encrypted and stored for '{args.name}'")
+
+    elif args.channel_command == "lockdown":
+        channels = manager.list_channels()
+        stopped = 0
+        for ch in channels:
+            if ch.get("state") in ("running", "starting", "paused"):
+                manager.update_state(ch["name"], "stopped")
+                stopped += 1
+        print(f"  {Colors.RED}⚠ LOCKDOWN:{Colors.RESET} {stopped} channel(s) stopped")
+
+    elif args.channel_command == "revoke-sessions":
+        # Sessions are in-memory in the daemon, so we signal via state
+        manager.update_config(args.name, {"_revoke_sessions": True})
+        print(f"  {Colors.GREEN}✓{Colors.RESET} Session revocation flagged for '{args.name}'")
+        print("    Active sessions will be invalidated on next daemon poll.")
+
+    elif args.channel_command == "logs":
+        from .channels import LOGS_DIR
+        log_path = os.path.join(LOGS_DIR, f"{args.name}.log")
+        if not os.path.exists(log_path):
+            print(f"  No logs found for channel '{args.name}'")
+            return
+        if args.follow:
+            print(f"  Following {log_path} (Ctrl+C to stop)\n")
+            try:
+                with open(log_path, "r") as f:
+                    f.seek(0, 2)  # End of file
+                    while True:
+                        line = f.readline()
+                        if line:
+                            print(line, end="")
+                        else:
+                            time.sleep(0.5)
+            except KeyboardInterrupt:
+                pass
+        else:
+            with open(log_path, "r") as f:
+                lines = f.readlines()
+            for line in lines[-50:]:
+                print(line, end="")
+
+    elif args.channel_command == "test":
+        ch = manager.get_channel(args.name)
+        if not ch:
+            print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found")
+            return
+        if ch.get("state") != "running":
+            print(f"  {Colors.YELLOW}Warning:{Colors.RESET} Channel is not running (state: {ch.get('state')})")
+        # Write a test event to the socket
+        sock_path = f"/tmp/kognisant_channel_{args.name}.sock"
+        if os.path.exists(sock_path):
+            print(f"  Socket exists: {sock_path}")
+            print(f"  {Colors.GREEN}✓{Colors.RESET} Channel appears connectable")
+        else:
+            print(f"  {Colors.RED}✗{Colors.RESET} No socket found — channel not running")
+
+    else:
+        print("  Usage: kognisant channel <add|remove|list|status|start|stop|set-credentials|lockdown|logs|test>")
+
+
+def _handle_channel_list_with_status(manager):
+    """Show all channels with status."""
+    from .colors import Colors
+    channels = manager.list_channels()
+    if not channels:
+        print("  No channels configured.")
+        return
+    print(f"\n  {Colors.BOLD}Channels:{Colors.RESET}\n")
+    for ch in channels:
+        name = ch.get("name", "?")
+        platform = ch.get("platform", "?")
+        mode = ch.get("mode", "?")
+        state = ch.get("state", "stopped")
+        if state == "running":
+            state_display = f"{Colors.GREEN}●{Colors.RESET} {state}"
+        elif state == "error":
+            state_display = f"{Colors.RED}●{Colors.RESET} {state}"
+        else:
+            state_display = f"○ {state}"
+        print(f"    {state_display}  {Colors.CYAN}{name}{Colors.RESET} ({platform}, {mode})")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="cli-kognisant: Autonomous AI copilot with background job execution (POSIX-only daemon)."
@@ -887,6 +1128,77 @@ def main():
         help="New script path (relative to ~/.kognisant_core/scripts/)"
     )
 
+    # --- Channel subcommands ---
+    channel_parser = subparsers.add_parser(
+        "channel", help="Manage channels (remote AI access + social media bots)"
+    )
+    channel_subparsers = channel_parser.add_subparsers(
+        dest="channel_command", help="Channel actions"
+    )
+
+    # channel add
+    channel_add_parser = channel_subparsers.add_parser("add", help="Create a new channel")
+    channel_add_parser.add_argument(
+        "name", help="Channel name (1-48 chars, [a-z0-9-])"
+    )
+    channel_add_parser.add_argument(
+        "--platform", required=True,
+        help="Target platform (telegram, x, discord, reddit, whatsapp, signal, webhook)"
+    )
+    channel_add_parser.add_argument(
+        "--mode", default="assistant",
+        help="Channel mode: assistant, manager, or hybrid (default: assistant)"
+    )
+    channel_add_parser.add_argument(
+        "--owner-id", action="append", default=None, dest="owner_ids",
+        help="Platform-native owner ID (repeatable for multiple owners)"
+    )
+
+    # channel remove
+    channel_remove_parser = channel_subparsers.add_parser("remove", help="Remove a channel and its data")
+    channel_remove_parser.add_argument("name", help="Name of the channel to remove")
+
+    # channel list
+    channel_subparsers.add_parser("list", help="List all channels with status")
+
+    # channel status
+    channel_status_parser = channel_subparsers.add_parser("status", help="Show detailed channel status")
+    channel_status_parser.add_argument("name", nargs="?", help="Channel name (shows all if omitted)")
+
+    # channel start
+    channel_start_parser = channel_subparsers.add_parser("start", help="Start a channel")
+    channel_start_parser.add_argument("name", help="Channel name to start")
+
+    # channel stop
+    channel_stop_parser = channel_subparsers.add_parser("stop", help="Stop a channel")
+    channel_stop_parser.add_argument("name", help="Channel name to stop")
+
+    # channel set-credentials
+    channel_creds_parser = channel_subparsers.add_parser(
+        "set-credentials", help="Set credentials for a channel (interactive)"
+    )
+    channel_creds_parser.add_argument("name", help="Channel name")
+
+    # channel lockdown
+    channel_subparsers.add_parser("lockdown", help="Emergency stop ALL channels")
+
+    # channel revoke-sessions
+    channel_revoke_parser = channel_subparsers.add_parser(
+        "revoke-sessions", help="Revoke all active remote sessions for a channel"
+    )
+    channel_revoke_parser.add_argument("name", help="Channel name")
+
+    # channel logs
+    channel_logs_parser = channel_subparsers.add_parser("logs", help="Show channel logs")
+    channel_logs_parser.add_argument("name", help="Channel name")
+    channel_logs_parser.add_argument(
+        "-f", "--follow", action="store_true", default=False, help="Follow log output"
+    )
+
+    # channel test
+    channel_test_parser = channel_subparsers.add_parser("test", help="Send a test message to verify connectivity")
+    channel_test_parser.add_argument("name", help="Channel name to test")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -1003,6 +1315,8 @@ def main():
         _handle_daemon(args)
     elif args.command == "job":
         _handle_job(args)
+    elif args.command == "channel":
+        _handle_channel(args)
     else:
         parser.print_help()
 

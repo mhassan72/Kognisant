@@ -230,6 +230,9 @@ Ollama, llama.cpp, OpenAI, DeepSeek, Groq, NVidia, Kimi, Nebius, or any OpenAI-c
 ### Autonomous Agents
 The `/agent` command dispatches a multi-agent swarm that plans, executes in parallel, reflects on outcomes, and persists learnings. Complex tasks like "research X and write Y" are auto-detected and delegated to the swarm without manual intervention.
 
+### Channels
+Access Kognisant remotely from Telegram, Discord, X, or any messaging platform. In hybrid mode, your DMs get full AI assistant access while public messages are handled by a persona-driven brand bot with template responses, moderation, and content scheduling.
+
 ### Background Daemon
 A POSIX daemon (Linux/macOS) runs persistent services, cron jobs, and one-shot AI tasks without an open terminal. Crash recovery, atomic writes, and log rotation included.
 
@@ -245,13 +248,14 @@ Models that support reasoning (gemma4, deepseek-r1, qwen3) stream their thinking
 
 These are documented in detail in [`docs/`](docs/):
 
-- **World Model** - Living dependency graph of your codebase with confidence-tracked knowledge, goal generation, and graduated autonomy
-- **Reflection Engine** - HOT (every turn), WARM (every 3rd), COLD (every 20th) health assessment with valence tracking
-- **Circuit Breakers** - Per-model failure detection (5 failures in 30s opens the breaker, 30s cooldown)
-- **Token Calibration** - Per-model correction factors that improve accuracy over time
-- **Dynamic Escalation** - Automatic detection of multi-step tasks and delegation to the agent swarm
-- **Spec-Driven Development** - Structured requirements, design, and task documents that agents execute against
-- **Telemetry** - Per-execution recording with `/telemetry` command for stats
+- **World Model** — Living dependency graph of your codebase with confidence-tracked knowledge, goal generation, and graduated autonomy
+- **Reflection Engine** — HOT (every turn), WARM (every 3rd), COLD (every 20th) health assessment with valence tracking
+- **Circuit Breakers** — Per-model failure detection (5 failures in 30s opens the breaker, 30s cooldown)
+- **Token Calibration** — Per-model correction factors that improve accuracy over time
+- **Dynamic Escalation** — Automatic detection of multi-step tasks and delegation to the agent swarm
+- **Spec-Driven Development** — Structured requirements, design, and task documents that agents execute against
+- **Channel Adapters** — Standalone scripts in isolated virtualenvs, communicating via Unix domain sockets (protocol v1.0)
+- **Telemetry** — Per-execution recording with `/telemetry` command for stats
 
 ---
 
@@ -260,13 +264,16 @@ These are documented in detail in [`docs/`](docs/):
 ### CLI
 
 ```bash
-kognisant init          # Initialize project memory
-kognisant chat          # Start interactive session
-kognisant setup         # Configure model providers
-kognisant status        # Workspace health check
-kognisant spec <name>   # Feature specification workflow
-kognisant daemon start  # Start background daemon
-kognisant job add       # Schedule a job
+kognisant init              # Initialize project memory
+kognisant chat              # Start interactive session
+kognisant setup             # Configure model providers
+kognisant status            # Workspace health check
+kognisant spec <name>       # Feature specification workflow
+kognisant daemon start      # Start background daemon
+kognisant job add           # Schedule a job
+kognisant channel add       # Create a channel (remote AI / social media)
+kognisant channel start     # Start a channel adapter
+kognisant channel list      # Show all channels with status
 ```
 
 ### Chat Slash Commands
@@ -282,6 +289,11 @@ kognisant job add       # Schedule a job
 | `/thinking` | Review AI reasoning |
 | `/telemetry` | Execution statistics |
 | `/goals` | World Model improvement goals |
+| `/channels` | List channels with status |
+| `/channel status <name>` | Detailed channel view |
+| `/channel start/stop <name>` | Control channel lifecycle |
+| `/channel escalations` | View pending human reviews |
+| `/jobs` | List background jobs |
 | `/paste` | Multi-line input mode |
 | `/spec` | Spec-Driven Development |
 
@@ -291,11 +303,27 @@ kognisant job add       # Schedule a job
 
 ```
 cli-kognisant/
-├── cli_kognisant/     # Source modules
-├── tests/             # 1000+ pytest tests
-├── docs/              # Technical documentation
-├── pyproject.toml     # Zero-dependency build config
-└── install.sh         # One-liner installer
+├── cli_kognisant/          # Source modules
+│   ├── main.py             # CLI entry point (argparse)
+│   ├── chat.py             # Interactive chat loop + slash commands
+│   ├── agents.py           # PERP swarm orchestration
+│   ├── channels.py         # Channel system (remote AI + SMM)
+│   ├── channel_daemon.py   # Daemon-side channel management
+│   ├── daemon.py           # Background daemon (fork, polling, lifecycle)
+│   ├── jobs.py             # Job queue, cron parser, file locking
+│   ├── config.py           # Configuration, model pool, project discovery
+│   ├── network.py          # API transport (retry, backoff, multi-protocol)
+│   ├── tools.py            # Tool schemas + execution
+│   ├── world_model.py      # Dependency graph + belief system
+│   ├── adapters/           # Reference channel adapter scripts
+│   └── ...
+├── tests/                  # 1000+ pytest tests
+├── docs/
+│   ├── developer/          # Architecture, internals, extension guides
+│   ├── user/               # User guides and walkthroughs
+│   └── upgrade_plans/      # Feature roadmaps (channels, sync, webapp)
+├── pyproject.toml          # Zero-dependency build config
+└── install.sh              # One-liner installer
 ```
 
 Full architecture details: [`docs/developer/architecture.md`](docs/developer/architecture.md)
@@ -304,15 +332,30 @@ Full architecture details: [`docs/developer/architecture.md`](docs/developer/arc
 
 ## Documentation
 
+### User Guides
+
 | Document | Content |
 |----------|---------|
-| [User Manual](docs/user/user_manual.md) | Complete usage guide |
-| [Architecture](docs/developer/architecture.md) | System design and module responsibilities |
+| [Getting Started](docs/user/getting-started.md) | Installation, first setup, first chat |
+| [Persistent Memory](docs/user/persistent-memory.md) | Two-layer memory system, skills |
+| [Autonomous Agents](docs/user/autonomous-agents.md) | PERP swarm, /agent, monitoring |
+| [Background Daemon](docs/user/background-daemon.md) | Daemon, jobs, cron scheduling |
+| [Channels](docs/user/channels.md) | Remote AI access + social media management |
+| [Models and Providers](docs/user/models-and-providers.md) | Multi-model support, switching |
+| [User Manual](docs/user/user_manual.md) | Complete reference |
+
+### Developer Docs
+
+| Document | Content |
+|----------|---------|
+| [Architecture](docs/developer/architecture.md) | System design, module map, data flow |
+| [Channels](docs/developer/channels.md) | UDS protocol, adapters, routing, encryption |
 | [Execution Engine](docs/developer/execution-engine.md) | Atomic writes, recovery, schema versioning |
+| [Job Lifecycle](docs/developer/job-lifecycle.md) | State machine, daemon polling, crash recovery |
+| [World Model](docs/developer/world-model.md) | Dependency graph, goals, graduated autonomy |
 | [Security](docs/developer/security.md) | Sandboxing, permissions, containment |
 | [CLI Reference](docs/developer/cli-reference.md) | All commands with flags and exit codes |
-| [World Model](docs/developer/world-model.md) | Dependency graph, goals, graduated autonomy |
-| [Job Lifecycle](docs/developer/job-lifecycle.md) | Daemon, scheduling, crash recovery |
+| [Testing](docs/developer/testing.md) | Test structure, fixtures, running tests |
 
 ---
 

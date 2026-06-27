@@ -278,6 +278,8 @@ kognisant channel list      # Show all channels with status
 | `/telemetry` | Execution statistics |
 | `/goals` | World Model improvement goals |
 | `/channels` | List channels with status |
+| `/channel add [name platform mode]` | Create a channel (guided if no args) |
+| `/channel remove <name>` | Remove a channel |
 | `/channel status <name>` | Detailed channel view |
 | `/channel start/stop <name>` | Control channel lifecycle |
 | `/channel escalations` | View pending human reviews |

@@ -145,6 +145,11 @@ CRUD for channel configs. Stores in `~/.kognisant_core/channels/channels.json`.
 
 Uses `FileLock` from `jobs.py` for concurrent access safety. Atomic writes via tempfile + rename.
 
+**Accessible from three surfaces:**
+- CLI: `kognisant channel add/remove/list/...` (main.py `_handle_channel()`)
+- Chat: `/channel add/remove/status/start/stop/pause/escalations` (chat.py slash command)
+- Daemon: `ChannelDaemonService` reads state to spawn/stop adapters
+
 ### `ChannelServer`
 
 Per-channel Unix domain socket server.

@@ -209,6 +209,8 @@ Inside a `kognisant chat` session:
 
 ```
 /channels                        List all channels with status
+/channel add [name platform mode] Create a new channel (guided if no args)
+/channel remove <name>           Remove a channel and its data
 /channel status [name]           Detailed status
 /channel start <name>            Start a channel
 /channel stop <name>             Stop a channel
@@ -216,6 +218,27 @@ Inside a `kognisant chat` session:
 /channel escalations             View pending human reviews
 /channel metrics <name>          Performance metrics (Phase 2a)
 ```
+
+**Creating a channel from chat:**
+
+```
+You > /channel add
+
+  Create a new channel
+
+  Channel name: my-bot
+  Platforms: discord, reddit, signal, telegram, webhook, whatsapp, x
+  Platform: telegram
+  Modes: assistant (remote AI), manager (social bot), hybrid (both)
+  Mode [assistant]: hybrid
+  Owner ID (e.g. tg:123456, leave blank to set later): tg:123456789
+
+  ✓ Channel 'my-bot' created (telegram, hybrid)
+  Next: set credentials with `kognisant channel set-credentials my-bot`
+  Then: `/channel start my-bot`
+```
+
+Or in one line: `/channel add my-bot telegram hybrid`
 
 ---
 

@@ -1032,19 +1032,68 @@ def process_slash_commands(
         return True
 
     elif cmd == "/channel":
-        # Channel management: /channel status|start|stop|pause|metrics|escalations <name>
-        from .channels import ChannelManager
+        # Channel management: /channel add|remove|status|start|stop|pause|metrics|escalations
+        from .channels import ChannelManager, VALID_PLATFORMS, VALID_MODES
         manager = ChannelManager()
-        parts = user_input.split(None, 2)  # /channel <subcmd> [name]
+        parts = user_input.split()  # /channel <subcmd> [args...]
 
         if len(parts) < 2:
-            print(f"  {Colors.YELLOW}Usage: /channel status|start|stop|pause|escalations <name>{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Usage: /channel add|remove|status|start|stop|pause|escalations <name>{Colors.RESET}\n")
             return True
 
         subcmd = parts[1].lower()
         ch_name = parts[2].strip() if len(parts) > 2 else None
 
-        if subcmd == "status":
+        if subcmd == "add":
+            # Interactive channel creation: /channel add <name> <platform> [mode]
+            # Or just /channel add for guided prompts
+            if len(parts) >= 4:
+                name = parts[2]
+                platform = parts[3]
+                mode = parts[4] if len(parts) > 4 else "assistant"
+            else:
+                # Guided flow
+                print(f"\n  {Colors.BOLD}Create a new channel{Colors.RESET}\n")
+                try:
+                    name = input(f"  Channel name: ").strip()
+                    if not name:
+                        print(f"  {Colors.YELLOW}Cancelled.{Colors.RESET}\n")
+                        return True
+                    print(f"  Platforms: {', '.join(sorted(VALID_PLATFORMS))}")
+                    platform = input(f"  Platform: ").strip().lower()
+                    print(f"  Modes: assistant (remote AI), manager (social bot), hybrid (both)")
+                    mode = input(f"  Mode [assistant]: ").strip().lower() or "assistant"
+                except (KeyboardInterrupt, EOFError):
+                    print(f"\n  {Colors.YELLOW}Cancelled.{Colors.RESET}\n")
+                    return True
+
+            # Optional owner ID
+            owner_ids = []
+            if mode in ("assistant", "hybrid"):
+                try:
+                    owner_id = input(f"  Owner ID (e.g. tg:123456, leave blank to set later): ").strip()
+                    if owner_id:
+                        owner_ids = [owner_id]
+                except (KeyboardInterrupt, EOFError):
+                    pass
+
+            try:
+                channel = manager.add_channel(name=name, platform=platform, mode=mode, owner_ids=owner_ids)
+                print(f"\n  {Colors.GREEN}✓{Colors.RESET} Channel '{name}' created ({platform}, {mode})")
+                print(f"  Next: set credentials with `kognisant channel set-credentials {name}`")
+                print(f"  Then: `/channel start {name}`\n")
+            except ValueError as e:
+                print(f"  {Colors.RED}Error:{Colors.RESET} {e}\n")
+            return True
+
+        elif subcmd == "remove" and ch_name:
+            if manager.remove_channel(ch_name):
+                print(f"  {Colors.GREEN}✓{Colors.RESET} Channel '{ch_name}' removed.\n")
+            else:
+                print(f"  {Colors.RED}Channel '{ch_name}' not found.{Colors.RESET}\n")
+            return True
+
+        elif subcmd == "status":
             if not ch_name:
                 # Show all
                 channels = manager.list_channels()
@@ -1122,7 +1171,7 @@ def process_slash_commands(
             return True
 
         else:
-            print(f"  {Colors.YELLOW}Usage: /channel status|start|stop|pause|escalations|metrics <name>{Colors.RESET}\n")
+            print(f"  {Colors.YELLOW}Usage: /channel add|remove|status|start|stop|pause|escalations|metrics <name>{Colors.RESET}\n")
             return True
 
     elif cmd == "/daemon":

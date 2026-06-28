@@ -837,6 +837,9 @@ def _execute(ctx: ExecutionContext) -> None:
                 }
                 if ctx.tools:
                     payload["tools"] = ctx.tools
+                    # Explicitly signal tool_choice to providers that require it
+                    # (Nvidia NIM, some OpenAI-compatible endpoints)
+                    payload["tool_choice"] = "auto"
 
                 # Add thinking flag for reasoning-capable local models
                 if is_local and reasoning_capable is not False:
@@ -934,6 +937,34 @@ def _execute(ctx: ExecutionContext) -> None:
                             sys.stdout.write(data)
                             sys.stdout.flush()
                             content_parts.append(data)
+
+                            # Degenerate loop detection: if the model is repeating
+                            # the same phrase (tool call narration without actually calling),
+                            # abort the stream to prevent infinite output.
+                            if len(content_parts) > 20:
+                                recent_text = "".join(content_parts[-50:]) if len(content_parts) > 50 else "".join(content_parts)
+                                # Check for repetitive patterns (same sentence 3+ times)
+                                sentences = [s.strip() for s in recent_text.split("\n") if s.strip()]
+                                if len(sentences) >= 6:
+                                    last_6 = sentences[-6:]
+                                    # If 4+ of the last 6 sentences are near-identical, it's a loop
+                                    from collections import Counter
+                                    counts = Counter(last_6)
+                                    most_common_count = counts.most_common(1)[0][1] if counts else 0
+                                    if most_common_count >= 4:
+                                        # Degenerate loop detected — abort stream
+                                        if is_tty:
+                                            sys.stdout.write(f"\n\n{Colors.YELLOW}⚠️  Repetitive output detected — model is narrating tool calls instead of executing them.{Colors.RESET}\n")
+                                            sys.stdout.write(f"{Colors.YELLOW}   Try: /model to switch models, or rephrase your request without needing file reads.{Colors.RESET}\n")
+                                        else:
+                                            sys.stdout.write("\n\n⚠️  Repetitive output detected. Try /model to switch.\n")
+                                        sys.stdout.flush()
+                                        # Treat as failed attempt
+                                        content_parts.clear()
+                                        ctx.response = ""
+                                        ctx.streamed = False
+                                        attempt_success = True  # Don't retry — it'll loop again
+                                        break
 
                         elif chunk_type == "tool_calls":
                             tool_calls = data

@@ -213,6 +213,11 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             )
             sys.stdout.flush()
 
+        # Emit worker start event for json_stream consumers
+        from . import json_stream
+        if json_stream.is_active():
+            json_stream.emit_swarm_worker_start(subtask_id, desc, task_model["name"])
+
         # Build local subtask assistant messages context
         messages = [
             {
@@ -619,6 +624,17 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             "tokens_out": estimate_tokens(response_content),
         }
 
+        # Emit worker complete event for json_stream consumers
+        from . import json_stream
+        if json_stream.is_active():
+            worker_artifacts = []
+            json_stream.emit_swarm_worker_complete(
+                subtask_id, success, worker_artifacts,
+                duration_ms=0,
+                tokens_in=results_dict[subtask_id]["tokens_in"],
+                tokens_out=results_dict[subtask_id]["tokens_out"],
+            )
+
         with print_lock:
             if success:
                 tokens_in = results_dict[subtask_id]["tokens_in"]
@@ -969,6 +985,11 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
             pass
         SwarmController.is_active = False
         return
+
+    # Emit swarm_start event for json_stream consumers
+    from . import json_stream
+    if json_stream.is_active():
+        json_stream.emit_swarm_start(user_task, len(subtasks), planning_model["name"])
 
     # ========================================================
     # 2 & 3. EXECUTE & REFLECT PHASES (Corrective Retry Loop)
@@ -1563,6 +1584,12 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
             f"\n  ✨ {Colors.BOLD}PERP Swarm Process Finished Successfully!{Colors.RESET}\n"
         )
         sys.stdout.flush()
+
+    # Emit swarm_complete event for json_stream consumers
+    from . import json_stream
+    if json_stream.is_active():
+        all_success = all(r.get("success", False) for r in results_dict.values())
+        json_stream.emit_swarm_complete(all_success, 0, len(results_dict), artifacts)
 
     # Trace: end session on successful completion
     try:

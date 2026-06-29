@@ -656,6 +656,11 @@ def _plan(ctx: ExecutionContext) -> None:
         else:
             print(f"📋 {cls_name} → ~{total} tokens input")
 
+    # Emit classification event to json_stream
+    from . import json_stream
+    if json_stream.is_active():
+        json_stream.emit_classification(ctx.classification, ctx.total_tokens_in)
+
     ctx.phase_times["plan"] = (time.monotonic() - t0) * 1000
 
 
@@ -974,6 +979,8 @@ def _execute(ctx: ExecutionContext) -> None:
                                     most_common_count = counts.most_common(1)[0][1] if counts else 0
                                     if most_common_count >= 4:
                                         # Degenerate loop detected — abort stream
+                                        if is_json:
+                                            json_stream.emit_degenerate_loop("Model narrating tool calls instead of executing them")
                                         if is_tty:
                                             sys.stdout.write(f"\n\n{Colors.YELLOW}⚠️  Repetitive output detected — model is narrating tool calls instead of executing them.{Colors.RESET}\n")
                                             sys.stdout.write(f"{Colors.YELLOW}   Try: /model to switch models, or rephrase your request without needing file reads.{Colors.RESET}\n")
@@ -1320,6 +1327,10 @@ def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
 
 def _handle_api_error(ctx: ExecutionContext, error_str: str, sub_state: str) -> None:
     """Handle API errors with appropriate user messaging and rollback."""
+    from . import json_stream
+    if json_stream.is_active():
+        json_stream.emit_error(ctx.error_type or "api_error", error_str[:200], recoverable=_is_retryable_error(error_str))
+
     is_tty = _is_tty()
 
     if "401" in error_str:

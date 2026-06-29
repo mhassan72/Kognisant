@@ -221,6 +221,12 @@ class ChannelDaemonService:
             return
 
         event = ChannelEvent.from_dict(raw_event)
+
+        # Emit channel event for json_stream consumers
+        from . import json_stream
+        if json_stream.is_active():
+            json_stream.emit_channel_event(channel_name, event.platform, event.event_type, event.sender_id, event.content)
+
         decision = ChannelRouter.route(event, channel)
 
         if decision == RouteDecision.DROP:
@@ -275,6 +281,11 @@ class ChannelDaemonService:
 
     def _send_reply(self, channel_name: str, event: ChannelEvent, content: str) -> None:
         """Send a reply action back to the adapter."""
+        # Emit channel response for json_stream consumers
+        from . import json_stream
+        if json_stream.is_active():
+            json_stream.emit_channel_response(channel_name, content, event.sender_id)
+
         server = self._servers.get(channel_name)
         if not server:
             return

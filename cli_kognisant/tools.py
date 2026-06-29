@@ -785,6 +785,9 @@ def create_project_file(file_path, content, project_info):
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
+        from . import json_stream
+        if json_stream.is_active():
+            json_stream.emit_file_created(file_path, os.path.getsize(full_path))
         return f"[Success] Created brand new file '{file_path}' with {len(content)} characters."
     except Exception as e:
         return f"[Error] Failed to create file: {e}"
@@ -824,9 +827,15 @@ def delete_project_path(target_path, project_info):
     try:
         if os.path.isdir(full_path):
             shutil.rmtree(full_path)
+            from . import json_stream
+            if json_stream.is_active():
+                json_stream.emit_file_deleted(target_path)
             return f"[Success] Recursively deleted directory '{target_path}'."
         else:
             os.remove(full_path)
+            from . import json_stream
+            if json_stream.is_active():
+                json_stream.emit_file_deleted(target_path)
             return f"[Success] Deleted file '{target_path}'."
     except Exception as e:
         return f"[Error] Failed to delete path: {e}"
@@ -925,6 +934,10 @@ def execute_tool(name, arguments, project_info):
 
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(content)
+
+            from . import json_stream
+            if json_stream.is_active():
+                json_stream.emit_file_modified(file_path, len(edits))
 
             return f"[Success] Sequentially applied {len(edits)} find-and-replace edits inside '{file_path}'."
         except Exception as e:

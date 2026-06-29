@@ -37,3 +37,6 @@ cli_kognisant.egg-info/
 .kognisant/specs/*/spec.json
 .kognisant/
 
+
+# planner 
+docs/upgrade_plans

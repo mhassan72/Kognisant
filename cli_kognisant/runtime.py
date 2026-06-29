@@ -818,7 +818,9 @@ def _execute(ctx: ExecutionContext) -> None:
                 retry_msg = f"Retry {attempt}/{max_attempts}..."
                 if attempt == 3:
                     retry_msg = f"Retry {attempt}/{max_attempts} (extended timeout)..."
-                if is_tty:
+                if is_json:
+                    json_stream.emit_warning("retry", retry_msg, attempt=attempt, max_attempts=max_attempts)
+                elif is_tty:
                     print(f"  {Colors.YELLOW}{retry_msg}{Colors.RESET}")
                 else:
                     print(f"  {retry_msg}")
@@ -1586,10 +1588,15 @@ def execute_message(
 
     try:
         # Phase 1: Bootstrap
+        from . import json_stream
+        if json_stream.is_active():
+            json_stream.emit_status("bootstrap")
         _bootstrap(ctx)
 
         # Early exit if bootstrap failed (e.g. local service not running)
         if ctx.error:
+            if json_stream.is_active():
+                json_stream.emit_error("bootstrap_failed", ctx.error, recoverable=False)
             model_name = ctx.active_model.get("name", model_config.get("name", "unknown"))
             return ExecutionResult(
                 success=False,
@@ -1608,9 +1615,13 @@ def execute_message(
             )
 
         # Phase 2: Plan
+        if json_stream.is_active():
+            json_stream.emit_status("planning")
         _plan(ctx)
 
         # Phase 3: Execute (or escalate to agent swarm for AUTONOMOUS)
+        if json_stream.is_active():
+            json_stream.emit_status("executing", classification=ctx.classification)
         if ctx.classification == "AUTONOMOUS":
             _escalate_to_swarm(ctx)
         else:
@@ -1618,6 +1629,8 @@ def execute_message(
 
         # Phase 4: Reflect (skip for AUTONOMOUS - swarm handles its own telemetry)
         if ctx.classification != "AUTONOMOUS":
+            if json_stream.is_active():
+                json_stream.emit_status("reflecting")
             valence_delta = _reflect(ctx)
 
         # Phase 5: Persist

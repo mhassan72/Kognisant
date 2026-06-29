@@ -1457,7 +1457,7 @@ def run_mock_chat(project_info=None):
 
 
 # ───────────────────────────────────────────────────────────
-def run_api_chat(model_config, project_info=None):
+def run_api_chat(model_config, project_info=None, resume_session: str | None = None):
     """Active multi-turn LLM chat loop powered by standard compatible APIs with tool execution and self-healing fallback."""
     from . import json_stream
 
@@ -1500,8 +1500,36 @@ def run_api_chat(model_config, project_info=None):
         f"session_{time.strftime('%Y%m%d_%H%M%S')}.json" if project_info else None
     )
 
-    if project_info:
+    # Session resumption: load messages from a previous session file
+    if resume_session and project_info:
+        resume_path = os.path.join(project_info["root"], ".kognisant", "history", resume_session)
+        if os.path.exists(resume_path):
+            try:
+                with open(resume_path, "r") as f:
+                    saved = json.load(f)
+                if isinstance(saved, list):
+                    messages = saved
+                elif isinstance(saved, dict) and "messages" in saved:
+                    messages = saved["messages"]
+                if is_json:
+                    json_stream.emit({
+                        "type": "session_resumed",
+                        "session_file": resume_session,
+                        "messages_loaded": len(messages),
+                    })
+                else:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Resumed session: {resume_session} ({len(messages)} messages loaded)")
+            except (json.JSONDecodeError, OSError) as e:
+                if is_json:
+                    json_stream.emit_warning("resume_failed", f"Could not resume session: {e}")
+                else:
+                    print(f"  {Colors.YELLOW}⚠ Could not resume session: {e}{Colors.RESET}")
+
+    if project_info and not messages:
         messages.append(build_system_prompt(project_info))
+        save_chat_session(project_info, messages, session_file)
+    elif project_info and messages:
+        # Already have messages from resume — just save under new session file
         save_chat_session(project_info, messages, session_file)
 
     # Display session-start goals if world model is enabled
@@ -2105,7 +2133,7 @@ def _save_setup_model(model_config, provider_name, api_key):
     set_default_model(model_config)
 
 
-def chat_flow():
+def chat_flow(resume_session: str | None = None):
     # Initialize global registry folder dynamically
     from .config import init_global_core
 
@@ -2223,4 +2251,4 @@ def chat_flow():
             run_mock_chat(project_info)
         else:
             # Go straight into chat with the default/active model!
-            run_api_chat(selected, project_info)
+            run_api_chat(selected, project_info, resume_session=resume_session)

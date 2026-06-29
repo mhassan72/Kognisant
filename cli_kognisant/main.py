@@ -40,6 +40,40 @@ def _handle_status():
         load_global_skills,
     )
     from .network import get_ollama_models
+    from . import json_stream
+
+    is_json = json_stream.is_active()
+
+    if is_json:
+        # Structured JSON output for status
+        import os
+        root = find_project_root()
+        compiled_models = get_compiled_models()
+        default_model = get_default_model(compiled_models) if compiled_models else None
+        skills = load_global_skills()
+        tools_dir = os.path.join(GLOBAL_CORE_DIR, "tools")
+        tool_count = len([f for f in os.listdir(tools_dir) if f.endswith(".py")]) if os.path.exists(tools_dir) else 0
+
+        from .channels import ChannelManager
+        channels = ChannelManager().list_channels()
+
+        json_stream.emit({
+            "type": "command_result",
+            "command": "status",
+            "data": {
+                "version": "0.1.0",
+                "workspace": root,
+                "global_core": os.path.exists(GLOBAL_CORE_DIR),
+                "skills_count": len(skills),
+                "tools_count": tool_count,
+                "active_model": default_model.get("name") if default_model else None,
+                "provider": default_model.get("provider") if default_model else None,
+                "models": [m.get("name") for m in compiled_models],
+                "channels": [{"name": ch.get("name"), "platform": ch.get("platform"),
+                              "state": ch.get("state")} for ch in channels],
+            },
+        })
+        return
 
     print(f"\n  {Colors.BOLD}Kognisant v0.1.0{Colors.RESET}\n")
 
@@ -781,7 +815,19 @@ def _handle_channel(args):
             print(f"  {Colors.RED}Error:{Colors.RESET} Channel '{args.name}' not found", file=sys.stderr)
 
     elif args.channel_command == "list":
+        from . import json_stream
         channels = manager.list_channels()
+
+        if json_stream.is_active():
+            json_stream.emit({
+                "type": "command_result",
+                "command": "channel_list",
+                "data": [{"name": ch.get("name"), "platform": ch.get("platform"),
+                          "mode": ch.get("mode"), "state": ch.get("state", "stopped")}
+                         for ch in channels],
+            })
+            return
+
         if not channels:
             print("  No channels configured. Create one with: kognisant channel add <name> --platform <platform>")
             return
@@ -1000,9 +1046,13 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     subparsers.add_parser("init", help="Initialize a Kognisant project directory")
-    subparsers.add_parser(
+    chat_parser = subparsers.add_parser(
         "chat",
         help="Start an interactive multi-turn chat session with Ollama detection",
+    )
+    chat_parser.add_argument(
+        "--resume-session", default=None, dest="resume_session",
+        help="Resume a previous session from a session file (for crash recovery)"
     )
     subparsers.add_parser(
         "status", help="Show workspace health, model connectivity, and spec status"
@@ -1217,7 +1267,7 @@ def main():
     elif args.command == "setup":
         _handle_setup()
     elif args.command == "chat":
-        chat_flow()
+        chat_flow(resume_session=getattr(args, "resume_session", None))
     elif args.command == "greet":
         if args.verbose:
             print(f"[DEBUG] CLI started with arguments: {args}", file=sys.stderr)

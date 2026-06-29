@@ -21,6 +21,7 @@ Welcome to the Kognisant user documentation. These guides cover every major feat
 | [Autonomous Agents](autonomous-agents.md) | PERP swarm, /agent command, monitoring, escalation |
 | [Background Daemon](background-daemon.md) | Daemon management, job types, cron scheduling |
 | [Channels](channels.md) | Remote AI access via messaging platforms + social media management |
+| [JSON Stream](json-stream.md) | Machine-readable output mode for GUIs, CI, and custom scripts |
 | [Tools and Skills](tools-and-skills.md) | Built-in tools, dynamic tool creation, custom skills |
 
 ### Advanced Features

@@ -46,6 +46,7 @@ Technical documentation for Kognisant contributors and maintainers. These docume
 | [job-lifecycle.md](job-lifecycle.md) | Job types, state machine, execution flows for scheduled/persistent/agent jobs, graceful shutdown, and SIGHUP responsiveness |
 | [cron-scheduling.md](cron-scheduling.md) | CronParser implementation, 5-field format, supported syntax, UTC evaluation, `can_match_within_days()`, `next_run()`, and clock jump handling |
 | [channels.md](channels.md) | Channels system: UDS IPC protocol, ChannelManager, ChannelRouter, adapter contract, credential encryption, daemon integration |
+| [json-stream.md](json-stream.md) | JSON stream protocol: event types, StdinReader, HeartbeatEmitter, adding events to new code |
 
 ### Infrastructure
 

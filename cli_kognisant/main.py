@@ -993,6 +993,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="cli-kognisant: Autonomous AI copilot with background job execution (POSIX-only daemon)."
     )
+    parser.add_argument(
+        "--json-stream", action="store_true", default=False,
+        help="Output structured JSON events to stdout for GUI/CI consumption (protocol v1.0)"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     subparsers.add_parser("init", help="Initialize a Kognisant project directory")
@@ -1200,6 +1204,11 @@ def main():
     channel_test_parser.add_argument("name", help="Channel name to test")
 
     args = parser.parse_args()
+
+    # Activate JSON stream mode if requested
+    if args.json_stream:
+        from .json_stream import activate as activate_json_stream
+        activate_json_stream()
 
     if args.command == "init":
         init_project()

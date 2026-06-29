@@ -1459,13 +1459,28 @@ def run_mock_chat(project_info=None):
 # ───────────────────────────────────────────────────────────
 def run_api_chat(model_config, project_info=None):
     """Active multi-turn LLM chat loop powered by standard compatible APIs with tool execution and self-healing fallback."""
+    from . import json_stream
+
     model_name = model_config["name"]
     provider_name = model_config["provider"]
     display_name = model_config.get("display_name", model_name)
+    is_json = json_stream.is_active()
 
-    print(
-        f"\n{Colors.BOLD}--- Starting Chat with '{display_name}' ({provider_name}) ---{Colors.RESET}"
-    )
+    if is_json:
+        # Emit session start and wait for handshake
+        from . import __version__
+        json_stream.emit_session_start(
+            cli_version=__version__,
+            project=project_info["root"] if project_info else None,
+            model=model_name,
+            provider=provider_name,
+            valence=0,
+        )
+        json_stream.wait_for_hello(timeout=5.0)
+    else:
+        print(
+            f"\n{Colors.BOLD}--- Starting Chat with '{display_name}' ({provider_name}) ---{Colors.RESET}"
+        )
     if project_info:
         print(
             f"📁 {Colors.CYAN}Project Mode Active:{Colors.RESET} {project_info['name']}"
@@ -1504,9 +1519,34 @@ def run_api_chat(model_config, project_info=None):
 
     while True:
         try:
-            user_input = prompt_boxed_input()
+            if is_json:
+                # JSON stream mode: read commands from stdin reader
+                cmd = json_stream.poll_command()
+                if cmd is None:
+                    # No command yet — wait briefly (non-busy)
+                    import time as _time
+                    _time.sleep(0.05)
+                    continue
+                cmd_type = cmd.get("type", "")
+                if cmd_type == "message":
+                    user_input = cmd.get("content", "")
+                elif cmd_type == "command":
+                    user_input = cmd.get("slash", "") + " " + cmd.get("args", "")
+                elif cmd_type == "exit" or cmd_type == "_eof":
+                    json_stream.emit_session_end("user_exit")
+                    break
+                elif cmd_type == "ping":
+                    json_stream.emit_pong()
+                    continue
+                else:
+                    continue
+            else:
+                user_input = prompt_boxed_input()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n{Colors.YELLOW}Goodbye! Thanks for chatting.{Colors.RESET}")
+            if is_json:
+                json_stream.emit_session_end("frontend_disconnect")
+            else:
+                print(f"\n{Colors.YELLOW}Goodbye! Thanks for chatting.{Colors.RESET}")
             break
 
         cleaned_input = user_input.strip()
@@ -1514,7 +1554,10 @@ def run_api_chat(model_config, project_info=None):
             continue
 
         if cleaned_input.lower() in ["exit", "quit"]:
-            print(f"{Colors.CYAN}Kognisant >{Colors.RESET} Goodbye!")
+            if is_json:
+                json_stream.emit_session_end("user_exit")
+            else:
+                print(f"{Colors.CYAN}Kognisant >{Colors.RESET} Goodbye!")
             break
 
         if cleaned_input.startswith("/"):
@@ -1527,6 +1570,10 @@ def run_api_chat(model_config, project_info=None):
             ):
                 save_chat_session(project_info, messages, session_file)
                 continue
+
+        # Emit user message event
+        if is_json:
+            json_stream.emit_user_message(cleaned_input)
 
         # Delegate to runtime orchestrator (5-phase lifecycle)
         result = execute_message(

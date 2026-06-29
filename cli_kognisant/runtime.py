@@ -765,8 +765,11 @@ def _build_api_messages(ctx: ExecutionContext) -> list[dict]:
 
 def _execute(ctx: ExecutionContext) -> None:
     """Phase 3: Stream LLM response with retry, thinking display, and tool loop."""
+    from . import json_stream
+
     t0 = time.monotonic()
     is_tty = _is_tty()
+    is_json = json_stream.is_active()
 
     # Append user message and save (R3.8 checkpoint is already set)
     ctx.messages.append({"role": "user", "content": ctx.user_message})
@@ -897,19 +900,25 @@ def _execute(ctx: ExecutionContext) -> None:
                                     spinner.stop()
                                     spinner = None
                                 # Print thinking header
-                                if is_tty:
+                                if is_json:
+                                    json_stream.emit_thinking_start()
+                                    json_stream.set_heartbeat_state("streaming", "thinking")
+                                elif is_tty:
                                     sys.stdout.write(f"{_DIM}💭 Thinking...{_RESET}\n")
                                 else:
                                     print("[THINKING]")
                                 # Mark reasoning capability as detected
                                 if reasoning_capable is None:
                                     reasoning_capable = True
-                            # Stream thinking tokens in dim
-                            if is_tty:
+                            # Stream thinking tokens
+                            if is_json:
+                                json_stream.emit_thinking_delta(data)
+                            elif is_tty:
                                 sys.stdout.write(f"{_DIM}{data}{_RESET}")
                             else:
                                 sys.stdout.write(data)
-                            sys.stdout.flush()
+                            if not is_json:
+                                sys.stdout.flush()
                             thinking_parts.append(data)
 
                         elif chunk_type == "content":
@@ -921,21 +930,33 @@ def _execute(ctx: ExecutionContext) -> None:
                                 # If we were showing thinking, close it and show duration
                                 if thinking_parts:
                                     thinking_duration = time.monotonic() - (thinking_start_time or t0)
-                                    if is_tty:
+                                    if is_json:
+                                        json_stream.emit_thinking_end(thinking_duration * 1000)
+                                    elif is_tty:
                                         sys.stdout.write(f"\n{_DIM}💭 Thought for {thinking_duration:.1f}s{_RESET}\n\n")
                                     else:
                                         sys.stdout.write(f"\n[THOUGHT for {thinking_duration:.1f}s]\n\n")
-                                    sys.stdout.flush()
-                                # Print response header
-                                if is_tty:
+                                    if not is_json:
+                                        sys.stdout.flush()
+                                # Print response header / emit content_start
+                                if is_json:
+                                    json_stream.emit_content_start()
+                                    json_stream.set_heartbeat_state("streaming", "llm_response")
+                                elif is_tty:
                                     print(f"{Colors.CYAN}Kognisant >{Colors.RESET}")
                                 else:
                                     print("Kognisant >")
                                 first_content = False
                                 ctx.streamed = True
-                            # Stream content to terminal
-                            sys.stdout.write(data)
-                            sys.stdout.flush()
+                            # Stream content
+                            if is_json:
+                                json_stream.emit_content_delta(data)
+                                # Check for cancel from frontend
+                                if json_stream.check_for_cancel():
+                                    raise KeyboardInterrupt
+                            else:
+                                sys.stdout.write(data)
+                                sys.stdout.flush()
                             content_parts.append(data)
 
                             # Degenerate loop detection: if the model is repeating
@@ -995,15 +1016,22 @@ def _execute(ctx: ExecutionContext) -> None:
 
                 # Newline after streamed content
                 if content_parts and ctx.streamed:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    if is_json:
+                        duration_ms = (time.monotonic() - t0) * 1000
+                        json_stream.emit_content_end(duration_ms, estimate_tokens("".join(content_parts)))
+                        json_stream.set_heartbeat_state("idle")
+                    else:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
 
                 # If thinking arrived but no content yet and we hit this point
                 if thinking_parts and not content_parts and not tool_calls:
                     # Model thought but produced no content - close thinking display
                     if thinking_start_time:
                         thinking_duration = time.monotonic() - thinking_start_time
-                        if is_tty and first_content:
+                        if is_json:
+                            json_stream.emit_thinking_end(thinking_duration * 1000)
+                        elif is_tty and first_content:
                             sys.stdout.write(f"\n{_DIM}💭 Thought for {thinking_duration:.1f}s{_RESET}\n")
                             sys.stdout.flush()
 
@@ -1186,6 +1214,9 @@ def _escalate_to_swarm(ctx: ExecutionContext) -> None:
 def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
                    is_tty: bool) -> list[dict]:
     """Execute tool calls with animated boxes. Returns list of tool result messages."""
+    from . import json_stream
+    is_json = json_stream.is_active()
+
     results = []
 
     for tc in tool_calls:
@@ -1197,6 +1228,11 @@ def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
             args = json.loads(func_args_str) if isinstance(func_args_str, str) else func_args_str
         except (json.JSONDecodeError, TypeError):
             args = {}
+
+        # Emit tool_start event
+        if is_json:
+            json_stream.emit_tool_start(call_id, func_name, args)
+            json_stream.set_heartbeat_state("tool_executing", func_name)
 
         # Print initial box (placeholder for animation)
         header_label = _get_tool_label(func_name, args, "progress")
@@ -1245,6 +1281,12 @@ def _execute_tools(ctx: ExecutionContext, tool_calls: list[dict],
             "success": tool_success,
             "duration": tool_duration_ms / 1000,
         })
+
+        # Emit tool_result event
+        if is_json:
+            summary = _get_result_summary(func_name, tool_result or "")
+            json_stream.emit_tool_result(call_id, tool_success, summary, tool_duration_ms)
+            json_stream.set_heartbeat_state("streaming", "llm_response")
 
         # Redraw final box
         state = "success" if tool_success else "failure"

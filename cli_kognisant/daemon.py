@@ -1124,6 +1124,18 @@ def _main_loop():
     except Exception as e:
         logger.warning("Channel service failed to initialize: %s", e)
 
+    # --- Batch queue initialization ---
+    batch_queue = None
+    try:
+        from .batch import get_batch_queue
+        batch_queue = get_batch_queue()
+        if batch_queue:
+            logger.info("Batch queue initialized (enabled)")
+        else:
+            logger.info("Batch queue disabled (batch_config.json: enabled=false)")
+    except Exception as e:
+        logger.warning("Batch queue failed to initialize: %s", e)
+
     # Clock jump detection (Requirement 11): use monotonic clock
     POLL_INTERVAL = 15  # seconds
     _last_tick = time.monotonic()
@@ -1870,6 +1882,13 @@ def _main_loop():
                 channel_service.poll()
             except Exception as e:
                 logger.error("Channel service poll error: %s", e)
+
+        # --- Batch queue poll (check job statuses, flush aged requests) ---
+        if batch_queue:
+            try:
+                batch_queue.poll()
+            except Exception as e:
+                logger.error("Batch queue poll error: %s", e)
 
         # --- Sleep for 15s polling interval with responsive shutdown/SIGHUP check ---
         # Check _shutdown_flag and _reload_flag every 500ms (Requirement 12)

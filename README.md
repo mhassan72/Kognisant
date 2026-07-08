@@ -3,7 +3,7 @@
 An open-source AI CLI assistant that remembers your projects, runs autonomous agents, and works with any LLM.
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 
 ```
@@ -370,4 +370,4 @@ AI tooling should be accessible, portable, and private. Not locked behind subscr
 
 ## License
 
-MIT
+Apache License 2.0

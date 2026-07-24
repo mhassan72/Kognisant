@@ -1253,6 +1253,18 @@ def main():
     channel_test_parser = channel_subparsers.add_parser("test", help="Send a test message to verify connectivity")
     channel_test_parser.add_argument("name", help="Channel name to test")
 
+    # --- Sync subcommands ---
+    sync_parser = subparsers.add_parser(
+        "sync", help="Optional device sync (push/pull encrypted data between machines)"
+    )
+    sync_subparsers = sync_parser.add_subparsers(dest="sync_command", help="Sync actions")
+    sync_subparsers.add_parser("login", help="Link this device to your web account")
+    sync_subparsers.add_parser("logout", help="Unlink this device")
+    sync_subparsers.add_parser("status", help="Show sync link status and usage")
+    sync_subparsers.add_parser("devices", help="List all linked devices")
+    sync_subparsers.add_parser("push", help="Encrypt and upload to cloud")
+    sync_subparsers.add_parser("pull", help="Download and decrypt from cloud")
+
     args = parser.parse_args()
 
     # Activate JSON stream mode if requested
@@ -1376,6 +1388,9 @@ def main():
         _handle_job(args)
     elif args.command == "channel":
         _handle_channel(args)
+    elif args.command == "sync":
+        from .sync import handle_sync
+        handle_sync(args)
     else:
         parser.print_help()
 

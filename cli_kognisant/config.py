@@ -906,10 +906,47 @@ def save_providers_and_pool(providers, pool):
 
 
 def get_compiled_models():
-    """Loads the explicit nested model pool configuration and flat-compiles it for the app context."""
+    """Loads the explicit nested model pool configuration and flat-compiles it for the app context.
+
+    Tier 1: Kognisant Cloud (if logged in)
+    Tier 2: User-configured external models
+    Tier 3: Local models (Ollama auto-discovery)
+    """
     providers, pool = load_providers_and_pool()
     compiled_models = []
 
+    # ── Tier 1: Kognisant Cloud models ───────────────────────────────────
+    try:
+        from .auth import is_logged_in
+        if is_logged_in():
+            from .network import fetch_kognisant_models
+            cloud_models = fetch_kognisant_models()
+            for m in cloud_models:
+                caps = m.get("capabilities", {})
+                # Skip embedding models — CLI uses chat models only
+                if caps.get("modality") == "embedding":
+                    continue
+                compiled_models.append({
+                    "name": m["id"],
+                    "display_name": m["id"].split("/")[-1],
+                    "provider": "Kognisant Cloud",
+                    "protocol": "openai",
+                    "api_base_url": "https://inference.kognisant.xyz/v1/",
+                    "api_key": "",  # Token injected at request time
+                    "capabilities": {
+                        "tool_calling": caps.get("tool_calling", False),
+                        "reasoning": caps.get("reasoning", False),
+                        "context_window": caps.get("context_window", 128000),
+                        "modality": caps.get("modality", "text"),
+                        "throughput_tps": m.get("throughput_tps", 0),
+                    },
+                    "_kognisant_hosted": True,
+                    "_pricing": m.get("pricing"),
+                })
+    except Exception:
+        pass  # Cloud models unavailable, continue with user pool
+
+    # ── Tier 2: User-configured external models ──────────────────────────
     pool_dict: dict = pool
     if isinstance(pool_dict, dict):
         selected_groups = pool_dict.get("selected_models", [])

@@ -16,7 +16,8 @@ ACTION_VERBS: set[str] = {
     "refactor", "implement", "build", "run", "execute", "test", "deploy",
     "add", "update", "install", "search", "browse", "download", "schedule",
     "script", "migrate", "optimize", "debug", "change", "move", "rename",
-    "copy", "generate", "make",
+    "copy", "generate", "make", "investigate", "diagnose", "analyze", "check",
+    "inspect", "scan", "find", "look", "help",
 }
 
 PROJECT_REFS: set[str] = {

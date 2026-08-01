@@ -141,7 +141,7 @@ class TestConstants(unittest.TestCase):
     """Validate the defined constant sets and patterns."""
 
     def test_action_verbs_count(self):
-        self.assertEqual(len(ACTION_VERBS), 32)
+        self.assertEqual(len(ACTION_VERBS), 41)
 
     def test_action_verbs_contains_expected(self):
         expected = {"fix", "create", "read", "edit", "write", "deploy", "make"}

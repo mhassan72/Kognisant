@@ -1,0 +1,4 @@
+include LICENSE
+include README.md
+recursive-include cli_kognisant *.py
+recursive-include cli_kognisant/adapters *.txt

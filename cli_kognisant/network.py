@@ -7,11 +7,81 @@ import urllib.request
 
 OLLAMA_HOST = "http://localhost:11434"
 
+KOGNISANT_INFERENCE_BASE = "https://inference.kognisant.xyz"
+
 
 class KognisantAPIError(Exception):
     """Custom exception raised for Kognisant network and API transport layer failures."""
 
     pass
+
+
+class ModelUnreachableError(KognisantAPIError):
+    """Raised when a specific model is unreachable after retries (500, 502, timeout)."""
+
+    def __init__(self, model_name: str, message: str = ""):
+        self.model_name = model_name
+        super().__init__(f"Model '{model_name}' unreachable: {message}")
+
+
+class ProviderUnreachableError(KognisantAPIError):
+    """Raised when an entire provider is unreachable (402, 401 after refresh)."""
+
+    def __init__(self, provider: str, reason: str = ""):
+        self.provider = provider
+        self.reason = reason
+        super().__init__(f"Provider '{provider}' unreachable: {reason}")
+
+
+# ─── Session-level unreachable tracking ───────────────────────────────────────
+
+_session_unreachable_models: set = set()
+_session_unreachable_providers: set = set()
+
+
+def _mark_model_unreachable(model_name: str):
+    """Mark a specific model as unreachable for this session."""
+    _session_unreachable_models.add(model_name)
+
+
+def _mark_provider_unreachable(provider: str, reason: str):
+    """Mark all models from a provider as unreachable for this session."""
+    _session_unreachable_providers.add(provider)
+
+
+def is_model_available(model: dict) -> bool:
+    """Check if a model can be used right now."""
+    if model.get("provider") in _session_unreachable_providers:
+        return False
+    if model.get("name") in _session_unreachable_models:
+        return False
+    return True
+
+
+def is_provider_reachable(provider: str) -> bool:
+    """Check if a provider is reachable."""
+    return provider not in _session_unreachable_providers
+
+
+def _get_auth_header(api_base_url: str, api_key: str) -> str | None:
+    """Get the Authorization header value for a request.
+
+    For Kognisant Cloud: injects Firebase token or API key from auth module.
+    For external providers: uses the provided api_key.
+    """
+    if api_key:
+        return f"Bearer {api_key}"
+
+    if KOGNISANT_INFERENCE_BASE in api_base_url:
+        from .auth import get_id_token
+        token = get_id_token()
+        if not token:
+            raise KognisantAPIError(
+                "Not authenticated. Run 'kognisant login' to use Kognisant Cloud models."
+            )
+        return f"Bearer {token}"
+
+    return None
 
 
 def get_ollama_models():
@@ -29,7 +99,7 @@ def get_ollama_models():
     return None
 
 
-def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
+def query_model_api_raw(api_base_url, api_key, payload, protocol="openai", model_name=""):
     """Sends a payload to any supported API protocol (OpenAI, Ollama, Llama.cpp) with retry and backoff."""
     url = api_base_url.rstrip("/")
 
@@ -45,8 +115,9 @@ def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
             url = f"{url}/chat/completions"
 
     headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    auth_header = _get_auth_header(api_base_url, api_key)
+    if auth_header:
+        headers["Authorization"] = auth_header
 
     # Adaptive Payload Conversion (if necessary)
     if protocol == "llama_cpp" and url.endswith("/completion"):
@@ -73,6 +144,7 @@ def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
     # Exponential Backoff and Retry Parameters
     max_retries = 3
     backoff = 1.0
+    is_kognisant = KOGNISANT_INFERENCE_BASE in api_base_url
 
     for attempt in range(max_retries):
         try:
@@ -88,7 +160,20 @@ def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
                     raise KognisantAPIError(f"HTTP Error {response.status} from API.")
 
         except urllib.error.HTTPError as e:
-            # Retry on transient status codes
+            if is_kognisant:
+                _handle_kognisant_error(e, model_name, attempt, max_retries)
+                # If _handle_kognisant_error returns (didn't raise), retry
+                # Rebuild request with fresh token on 401 retry
+                if e.code == 401:
+                    fresh_auth = _get_auth_header(api_base_url, api_key)
+                    if fresh_auth:
+                        req.remove_header("Authorization")
+                        req.add_header("Authorization", fresh_auth)
+                time.sleep(backoff)
+                backoff *= 2.0
+                continue
+
+            # Non-Kognisant: existing retry logic
             if e.code in [429, 502, 503, 504] and attempt < max_retries - 1:
                 time.sleep(backoff)
                 backoff *= 2.0
@@ -107,13 +192,16 @@ def query_model_api_raw(api_base_url, api_key, payload, protocol="openai"):
                 time.sleep(backoff)
                 backoff *= 2.0
                 continue
+            if is_kognisant and model_name:
+                _mark_model_unreachable(model_name)
+                raise ModelUnreachableError(model_name, str(e))
             raise KognisantAPIError(f"Network Connection Failed: {e}")
 
 
 def query_model_api(api_base_url, api_key, model_name, messages, protocol="openai"):
     """Queries any supported API protocol and returns content."""
     payload = {"model": model_name, "messages": messages, "stream": False}
-    resp_data = query_model_api_raw(api_base_url, api_key, payload, protocol=protocol)
+    resp_data = query_model_api_raw(api_base_url, api_key, payload, protocol=protocol, model_name=model_name)
 
     if not resp_data:
         raise KognisantAPIError("Received empty response from model API.")
@@ -143,7 +231,7 @@ def query_model_api(api_base_url, api_key, model_name, messages, protocol="opena
     )
 
 
-def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", timeout=120.0):
+def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", timeout=120.0, model_name=""):
     """Send a streaming request to the LLM API. Yields (chunk_type, data) tuples.
 
     chunk_type is one of:
@@ -167,8 +255,9 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
             url = f"{url}/chat/completions"
 
     headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    auth_header = _get_auth_header(api_base_url, api_key)
+    if auth_header:
+        headers["Authorization"] = auth_header
 
     # Force stream=True in payload
     payload = dict(payload)
@@ -332,3 +421,117 @@ def query_model_api_stream(api_base_url, api_key, payload, protocol="openai", ti
         assistant_message["_usage"] = usage_data
 
     yield ("done", assistant_message)
+
+
+# ─── Kognisant Cloud Error Handler ────────────────────────────────────────────
+
+
+def _handle_kognisant_error(error, model_name: str, attempt: int, max_retries: int):
+    """Handle HTTP errors from the Kognisant inference API.
+
+    Key distinction:
+      - 401, 402 → provider-level (all cloud models affected)
+      - 404, 429, 500, 502, 503 → model-level (only this model marked, try others)
+
+    Returns normally if the error is retryable (caller should retry).
+    Raises an exception if the error is fatal.
+    """
+    try:
+        body = json.loads(error.read().decode("utf-8"))
+        message = body.get("error", {}).get("message", f"HTTP {error.code}")
+    except (json.JSONDecodeError, KeyError, AttributeError):
+        message = f"HTTP {error.code}"
+
+    # ── Account-level failures (mark entire provider) ──────────
+    if error.code == 401:
+        # Force token refresh, retry once
+        from .auth import get_id_token
+        token = get_id_token(force_refresh=True)
+        if token and attempt == 0:
+            return  # Will retry with fresh token
+        _mark_provider_unreachable("Kognisant Cloud", "authentication failed")
+        raise KognisantAPIError(
+            "Authentication failed. Run 'kognisant login' to re-authenticate.\n"
+            "  If the problem persists, contact support@kognisant.xyz"
+        )
+
+    if error.code == 402:
+        _mark_provider_unreachable("Kognisant Cloud", "insufficient balance")
+        import sys
+        print(
+            f"  \u26a0\ufe0f  Kognisant Cloud unavailable (insufficient balance). Using external models.\n"
+            f"      Top up at: kognisant.xyz/console/billing",
+            file=sys.stderr,
+        )
+        raise ProviderUnreachableError("Kognisant Cloud", "insufficient balance")
+
+    # ── Model-level failures (mark only this model) ────────────
+    if error.code == 404:
+        if model_name:
+            _mark_model_unreachable(model_name)
+        raise ModelUnreachableError(model_name or "unknown", f"Model not found: {message}")
+
+    if error.code in (429, 500, 502, 503):
+        if attempt < max_retries - 1:
+            return  # Will retry with backoff
+
+        # Retries exhausted — mark this model unreachable
+        if model_name:
+            _mark_model_unreachable(model_name)
+        raise ModelUnreachableError(model_name or "unknown", message)
+
+    raise KognisantAPIError(f"API Error {error.code}: {message}")
+
+
+def fetch_kognisant_models() -> list:
+    """Fetch available models from Kognisant Cloud inference API.
+
+    Endpoint is public — no auth required for model listing.
+    Returns list of model dicts, or [] on failure.
+    """
+    import os
+
+    cache_path = os.path.join(
+        os.path.expanduser("~/.kognisant_core"), "cloud_models_cache.json"
+    )
+
+    # Check disk cache first
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if cache.get("expires_at", 0) > time.time():
+                return cache.get("models", [])
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    # Fetch from API
+    url = f"{KOGNISANT_INFERENCE_BASE}/v1/models"
+    req = urllib.request.Request(url, method="GET")
+    ctx = ssl._create_unverified_context()
+
+    try:
+        with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = data.get("data", [])
+
+        # Save to disk cache (1 hour TTL)
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            cache_data = {"models": models, "expires_at": time.time() + 3600}
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f)
+        except OSError:
+            pass
+
+        return models
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        # Fallback to expired cache if API unreachable
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+                return cache.get("models", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []

@@ -8,12 +8,69 @@ import time
 
 from .colors import Colors, Spinner
 from .config import GLOBAL_CORE_DIR, load_spec_info, is_world_model_enabled, load_world_model
-from .network import query_model_api, query_model_api_raw
+from .network import query_model_api, query_model_api_raw, ModelUnreachableError, ProviderUnreachableError
 from .observer import TraceCollector
 from .telemetry import estimate_tokens
 from .tools import execute_tool, load_global_tools
 
 logger = logging.getLogger(__name__)
+
+
+def _repair_truncated_json(content: str) -> dict | None:
+    """Attempt to repair truncated JSON from models that hit max_tokens.
+
+    Strategies:
+      1. Close unclosed strings, arrays, and objects
+      2. Try progressively shorter substrings
+      3. Extract the phases/subtasks array even from partial JSON
+
+    Returns parsed dict or None if repair fails.
+    """
+    # Strategy 1: Close open structures
+    repaired = content.rstrip()
+
+    # Count open braces/brackets
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+
+    # If we're inside an unterminated string, close it
+    # Check if odd number of unescaped quotes
+    in_string = False
+    for i, ch in enumerate(repaired):
+        if ch == '"' and (i == 0 or repaired[i - 1] != '\\'):
+            in_string = not in_string
+    if in_string:
+        repaired += '"'
+
+    # Close arrays and objects
+    repaired += "]" * max(0, open_brackets)
+    repaired += "}" * max(0, open_braces)
+
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Try trimming from the end to last complete element
+    # Find the last valid comma or closing bracket before truncation
+    for trim_point in [
+        content.rfind("},"),
+        content.rfind("}]"),
+        content.rfind('"}'),
+        content.rfind("]},"),
+    ]:
+        if trim_point > 0:
+            candidate = content[: trim_point + 1]
+            open_b = candidate.count("{") - candidate.count("}")
+            open_br = candidate.count("[") - candidate.count("]")
+            candidate += "]" * max(0, open_br) + "}" * max(0, open_b)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+    return None
+
 
 # Device Capability Awareness: Cap local concurrency based on CPU counts to prevent system freezes
 CPU_COUNT = os.cpu_count() or 4
@@ -37,17 +94,15 @@ class SwarmController:
 
 
 def get_best_models_pool(compiled_models, active_model_name=None):
-    """Select planner and task models based on capabilities, not provider type.
+    """Select planner and task models with tier and cost awareness.
 
-    Priority for planner (needs reasoning):
-      1. Active model (if reasoning-capable, it's proven working)
-      2. Models with capabilities.reasoning == true, sorted by reliability
-      3. Models with unknown reasoning capability (worth trying)
-      4. Any reachable model (last resort)
+    Planner (needs reasoning + tool_calling):
+      → Most capable cloud model (highest context, reasoning=true)
+      → Fallback: best external model with reasoning
 
-    Priority for task workers (needs tool_calling):
-      1. Models with capabilities.tool_calling == true
-      2. Any reachable model
+    Task workers (needs tool_calling):
+      → Cheapest cloud model with tool_calling
+      → Fallback: best external model with tool_calling
 
     Returns (planning_model, task_model).
     """
@@ -55,89 +110,87 @@ def get_best_models_pool(compiled_models, active_model_name=None):
         mock = {"name": "mock", "provider": "Offline", "api_base_url": ""}
         return mock, mock
 
+    from .network import is_model_available
+
+    # Filter to only available models
+    reachable = [m for m in compiled_models if is_model_available(m)]
+    if not reachable:
+        # Nothing available — return first compiled model as last resort
+        return compiled_models[0], compiled_models[0]
+
     # Load self_model for learned capabilities
     from .self_model_engine import SelfModelEngine
     self_model = SelfModelEngine.load()
 
     def _get_reasoning_capability(model):
         """Check if model is reasoning-capable from pool config or learned state."""
-        # Check pool config first (user override)
         caps = model.get("capabilities", {})
         if "reasoning" in caps:
             return caps["reasoning"]
-        # Check learned state from self_model
         name = model.get("name", "")
         rel = self_model.model_reliability.get(name)
         if rel and "reasoning" in rel.capabilities:
             return rel.capabilities["reasoning"]
         return None  # Unknown
 
-    def _get_reliability(model):
-        """Get model reliability score from self_model (higher is better)."""
-        name = model.get("name", "")
-        rel = self_model.model_reliability.get(name)
-        if rel:
-            return rel.reliability
-        return 0.5  # Unknown default
+    # ── Planner: premium model (reasoning + tool_calling) ──────────────
+    planner_candidates = [m for m in reachable
+                          if _get_reasoning_capability(m) is True
+                          and m.get("capabilities", {}).get("tool_calling") is True]
 
-    def _is_session_reachable(model):
-        """Check if model hasn't failed with auth/payment errors this session."""
-        name = model.get("name", "")
-        return name not in _session_unreachable
+    # Sort: cloud-first, then by context_window (larger = more capable)
+    planner_candidates.sort(key=lambda m: (
+        not m.get("_kognisant_hosted", False),
+        -m.get("capabilities", {}).get("context_window", 0),
+    ))
 
-    # Categorize models
-    reasoning_true = []    # Proven reasoning capability
-    reasoning_unknown = [] # Not yet tested
-    reasoning_false = []   # Proven non-reasoning
-
-    for model in compiled_models:
-        if not _is_session_reachable(model):
-            continue
-        cap = _get_reasoning_capability(model)
-        if cap is True:
-            reasoning_true.append(model)
-        elif cap is None:
-            reasoning_unknown.append(model)
-        else:
-            reasoning_false.append(model)
-
-    # Sort by reliability (highest first)
-    reasoning_true.sort(key=_get_reliability, reverse=True)
-    reasoning_unknown.sort(key=_get_reliability, reverse=True)
-
-    # If active model is reasoning-capable and reachable, put it first
-    if active_model_name:
-        for model_list in [reasoning_true, reasoning_unknown]:
-            for i, m in enumerate(model_list):
-                if m.get("name") == active_model_name:
-                    # Move to front
-                    model_list.insert(0, model_list.pop(i))
-                    break
-
-    # Build planner candidates: reasoning_true > reasoning_unknown > any reachable
-    planner_candidates = reasoning_true + reasoning_unknown
+    # If no proven reasoning models, try models with unknown reasoning (worth trying)
     if not planner_candidates:
-        # Last resort: use any reachable model even if reasoning: false
-        planner_candidates = reasoning_false
+        planner_candidates = [m for m in reachable
+                              if _get_reasoning_capability(m) is not False
+                              and m.get("capabilities", {}).get("tool_calling") is True]
+        planner_candidates.sort(key=lambda m: (
+            not m.get("_kognisant_hosted", False),
+            -m.get("capabilities", {}).get("context_window", 0),
+        ))
 
-    planning_model = planner_candidates[0] if planner_candidates else compiled_models[0]
+    # If active model is a valid planner candidate, prefer it (proven working)
+    if active_model_name and planner_candidates:
+        for i, m in enumerate(planner_candidates):
+            if m.get("name") == active_model_name:
+                planner_candidates.insert(0, planner_candidates.pop(i))
+                break
 
-    # Task model: prefer tool_calling capable, any reachable model
-    task_candidates = [m for m in compiled_models if _is_session_reachable(m)]
-    tool_capable = [m for m in task_candidates
-                    if m.get("capabilities", {}).get("tool_calling", True)]
-    task_model = tool_capable[0] if tool_capable else (task_candidates[0] if task_candidates else compiled_models[0])
+    planning_model = planner_candidates[0] if planner_candidates else reachable[0]
+
+    # ── Task workers: cheaper model with tool_calling ──────────────────
+    task_candidates = [m for m in reachable
+                       if m.get("capabilities", {}).get("tool_calling") is True]
+
+    # Sort: cloud-first, then by output cost (cheapest first)
+    task_candidates.sort(key=lambda m: (
+        not m.get("_kognisant_hosted", False),
+        m.get("_pricing", {}).get("output_per_million", 999) if m.get("_pricing") else 999,
+    ))
+
+    task_model = task_candidates[0] if task_candidates else reachable[0]
 
     return planning_model, task_model
 
 
-# Session-level unreachable tracking (in-memory, resets on restart)
+# Session-level unreachable tracking (now delegated to network module)
+# Keep this for backward compatibility with code that still references it
 _session_unreachable: set = set()
 
 
 def _mark_session_unreachable(model_name: str):
-    """Mark a model as unreachable for this session (auth/payment/rate failures)."""
+    """Mark a model as unreachable for this session (auth/payment/rate failures).
+
+    Also marks in network module for unified tracking.
+    """
     _session_unreachable.add(model_name)
+    from .network import _mark_model_unreachable
+    _mark_model_unreachable(model_name)
 
 
 def _get_planner_candidates(compiled_models, active_model_name=None):
@@ -499,20 +552,65 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             # Merge with globally transferable tools dynamically
             subagent_tools = baseline_tools + autonomous_tools + load_global_tools()
 
+            # Sanitize messages before sending — ensure every message has role + content as strings
+            sanitized_messages = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                if role == "tool":
+                    sanitized_messages.append({
+                        "role": "tool",
+                        "tool_call_id": msg.get("tool_call_id", ""),
+                        "content": str(msg.get("content", "")),
+                    })
+                elif role == "assistant" and "tool_calls" in msg:
+                    sanitized_messages.append({
+                        "role": "assistant",
+                        "content": msg.get("content") or "",
+                        "tool_calls": msg["tool_calls"],
+                    })
+                else:
+                    sanitized_messages.append({
+                        "role": role,
+                        "content": str(msg.get("content", "")),
+                    })
+
             # OpenAI / Cloud completion with full tool access
             payload = {
                 "model": task_model["name"],
-                "messages": messages,
+                "messages": sanitized_messages,
                 "stream": False,
                 "tools": subagent_tools,
             }
 
-            resp_data = query_model_api_raw(
-                task_model["api_base_url"],
-                task_model.get("api_key", ""),
-                payload,
-                protocol=task_model.get("protocol", "openai"),
-            )
+            try:
+                resp_data = query_model_api_raw(
+                    task_model["api_base_url"],
+                    task_model.get("api_key", ""),
+                    payload,
+                    protocol=task_model.get("protocol", "openai"),
+                    model_name=task_model.get("name", ""),
+                )
+            except (ModelUnreachableError, ProviderUnreachableError) as model_err:
+                # Model/provider failed — try to find a fallback model
+                from .network import is_model_available
+                from .config import get_compiled_models
+                fallback_models = [m for m in get_compiled_models()
+                                   if is_model_available(m)
+                                   and m.get("capabilities", {}).get("tool_calling") is True
+                                   and m.get("name") != task_model.get("name")]
+                if fallback_models:
+                    # Switch to fallback and retry this attempt
+                    task_model = fallback_models[0]
+                    payload["model"] = task_model["name"]
+                    resp_data = query_model_api_raw(
+                        task_model["api_base_url"],
+                        task_model.get("api_key", ""),
+                        payload,
+                        protocol=task_model.get("protocol", "openai"),
+                        model_name=task_model.get("name", ""),
+                    )
+                else:
+                    raise model_err  # No fallback available
 
             if not resp_data or "choices" not in resp_data:
                 raise Exception("Empty or malformed JSON returned from the model API.")
@@ -522,14 +620,34 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
             tool_calls = assistant_message.get("tool_calls")
 
             if tool_calls:
-                messages.append(assistant_message)
-                for tool_call in tool_calls:
+                # Sanitize assistant message before appending
+                # Only include fields the API accepts: role, content, tool_calls
+                # Also sanitize each tool_call to ensure required fields exist
+                sanitized_tool_calls = []
+                for tc in tool_calls:
+                    sanitized_tc = {
+                        "id": tc.get("id") or f"call_{subtask_id}_{attempts}_{len(sanitized_tool_calls)}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("function", {}).get("name", "unknown"),
+                            "arguments": tc.get("function", {}).get("arguments", "{}"),
+                        },
+                    }
+                    sanitized_tool_calls.append(sanitized_tc)
+
+                clean_assistant = {
+                    "role": "assistant",
+                    "content": assistant_message.get("content") or "",
+                    "tool_calls": sanitized_tool_calls,
+                }
+                messages.append(clean_assistant)
+                for tc_idx, tool_call in enumerate(sanitized_tool_calls):
                     # Thread pause check before executing tool calls
                     if SwarmController.stop_event.is_set():
                         return
                     SwarmController.resume_event.wait()
 
-                    call_id = tool_call.get("id")
+                    call_id = tool_call["id"]
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
 
@@ -605,8 +723,7 @@ def run_subtask_agent(subtask, task_model, project_info, results_dict, subtask_i
                         {
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "name": func_name,
-                            "content": result,
+                            "content": result if result else "",
                         }
                     )
                 continue
@@ -935,7 +1052,14 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                     plan_content.split("```", 1)[1].split("```", 1)[0].strip()
                 )
 
-            plan_data = json.loads(plan_content)
+            # Attempt JSON parse with repair for truncated responses
+            try:
+                plan_data = json.loads(plan_content)
+            except json.JSONDecodeError:
+                # Try to repair truncated JSON (model hit max_tokens)
+                plan_data = _repair_truncated_json(plan_content)
+                if plan_data is None:
+                    raise
     except Exception as e:
         spinner.stop()
         with print_lock:
@@ -1555,7 +1679,7 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
             except Exception:
                 pass
 
-        print(f"\n  {Colors.BOLD}🐝 Swarm Complete ({len(results)} subtasks){Colors.RESET}")
+        print(f"\n  {Colors.BOLD}🐝 Swarm Complete ({len(results_dict)} subtasks){Colors.RESET}")
         print(f"  ┌{'─' * 72}┐")
         print(f"  │ {'Token Usage':<70} │")
         print(f"  ├{'─' * 72}┤")
@@ -1580,6 +1704,79 @@ def _orchestrate_worker(user_task, project_info, compiled_models, force_mock=Fal
                 print(f"  │ {art_line:<70} │")
 
         print(f"  └{'─' * 72}┘")
+
+    # ── Final Synthesis: Generate a user-facing summary from swarm results ──
+    successful_results = [r for r in results_dict.values() if r.get("success") and r.get("response")]
+    if successful_results:
+        with print_lock:
+            print(f"\n  {Colors.BOLD}📝 Synthesizing results...{Colors.RESET}")
+            sys.stdout.flush()
+
+        # Build synthesis prompt from successful agent outputs
+        results_summary = "\n\n".join(
+            f"[Subtask: {r['description'][:80]}]\n{r['response'][:2000]}"
+            for r in successful_results
+        )
+        synthesis_prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Kognisant's Synthesis Agent. The user asked a question and a swarm of agents "
+                    "worked on it. Below are the results from the agents that succeeded. Your job is to "
+                    "synthesize these into a single, clear, coherent response that directly answers the "
+                    "user's original question. Be concise and actionable. Do NOT mention the swarm, agents, "
+                    "or internal process — just deliver the answer as if you investigated it yourself."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Original question: {user_task}\n\nAgent findings:\n{results_summary}",
+            },
+        ]
+
+        try:
+            # Use the planning model for synthesis (best reasoning)
+            synthesis_response = query_model_api(
+                planning_model["api_base_url"],
+                planning_model.get("api_key", ""),
+                planning_model["name"],
+                synthesis_prompt,
+                protocol=planning_model.get("protocol", "openai"),
+            )
+            if synthesis_response:
+                with print_lock:
+                    print(f"\n  {Colors.BOLD}Kognisant >{Colors.RESET}\n")
+                    # Render as markdown if possible
+                    try:
+                        from .colors import render_markdown
+                        render_markdown(synthesis_response)
+                    except Exception:
+                        print(f"  {synthesis_response}")
+                    print()
+                    sys.stdout.flush()
+        except Exception as e:
+            logger.debug("Synthesis failed: %s", e)
+            # Fallback: just print the raw results
+            with print_lock:
+                print(f"\n  {Colors.BOLD}Results:{Colors.RESET}\n")
+                for r in successful_results:
+                    desc = r["description"][:60]
+                    resp = r["response"][:500]
+                    print(f"  • {desc}")
+                    print(f"    {resp}\n")
+                sys.stdout.flush()
+    else:
+        with print_lock:
+            print(f"\n  {Colors.YELLOW}⚠️  No agents completed successfully. Nothing to report.{Colors.RESET}")
+            if any(r.get("response") for r in results_dict.values()):
+                print(f"  Partial outputs from failed agents:")
+                for sid, r in sorted(results_dict.items()):
+                    if r.get("response") and "[Error]" in r["response"]:
+                        print(f"    Agent [{sid}]: {r['response'][:100]}")
+            print()
+            sys.stdout.flush()
+
+    with print_lock:
         print(
             f"\n  ✨ {Colors.BOLD}PERP Swarm Process Finished Successfully!{Colors.RESET}\n"
         )

@@ -1061,6 +1061,18 @@ def main():
         "setup", help="Configure AI model providers (API keys, endpoints)"
     )
 
+    # --- Login/Logout commands ---
+    login_parser = subparsers.add_parser(
+        "login", help="Authenticate with Kognisant Cloud (enables cloud inference models)"
+    )
+    login_parser.add_argument(
+        "--api-key", action="store_true", default=False, dest="api_key_mode",
+        help="Use API key instead of browser login (for CI/headless environments)"
+    )
+    subparsers.add_parser(
+        "logout", help="Clear Kognisant Cloud credentials"
+    )
+
     greet_parser = subparsers.add_parser("greet", help="Greet a user")
     greet_parser.add_argument(
         "-n", "--name", type=str, default="World", help="The name to greet"
@@ -1278,6 +1290,12 @@ def main():
         _handle_status()
     elif args.command == "setup":
         _handle_setup()
+    elif args.command == "login":
+        from .auth import login
+        login(api_key_mode=getattr(args, "api_key_mode", False))
+    elif args.command == "logout":
+        from .auth import logout
+        logout()
     elif args.command == "chat":
         chat_flow(resume_session=getattr(args, "resume_session", None))
     elif args.command == "greet":

@@ -3,6 +3,7 @@
 An open-source AI CLI assistant that remembers your projects, runs autonomous agents, and works with any LLM.
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![PyPI](https://img.shields.io/pypi/v/kognisant.svg)](https://pypi.org/project/kognisant/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 
@@ -12,7 +13,7 @@ Requirements
   ✓ No Docker
   ✓ No Node.js
   ✓ No external dependencies
-  ✓ Works with any OpenAI-compatible API or local model (Ollama, llama.cpp)
+  ✓ Works with Kognisant Cloud, any OpenAI-compatible API, or local models (Ollama, llama.cpp)
 ```
 
 ---
@@ -61,7 +62,7 @@ Done. I've replaced the session-based auth with JWT:
 | You explain your project every session | Persistent memory loads automatically. No re-explaining. |
 | AI forgets context between messages | Two-layer memory: per-project + global knowledge. |
 | Complex tasks need manual babysitting | Autonomous agents plan, execute, and reflect without intervention. |
-| Locked into one provider | Switch between any LLM mid-session. Local or cloud. |
+| Locked into one provider | Kognisant Cloud models out of the box, plus any LLM. Local or cloud. |
 | Tools are hardcoded and limited | AI builds its own tools when it encounters new tasks. |
 | No visibility into what the AI is doing | Every phase is transparent: classification, tokens, timing, reasoning. |
 | Background tasks require separate tooling | Built-in daemon with cron scheduling and persistent services. |
@@ -71,10 +72,16 @@ Done. I've replaced the session-based auth with JWT:
 ## Install
 
 ```bash
+pip install kognisant
+```
+
+Or with the installer (creates an isolated venv):
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/mhassan72/Kognisant/main/install.sh | sh
 ```
 
-Or manually:
+Or from git:
 
 ```bash
 pip install git+https://github.com/mhassan72/Kognisant.git
@@ -105,7 +112,13 @@ kognisant init
 kognisant chat
 ```
 
-It auto-detects Ollama locally. Or use `/model` to add any OpenAI-compatible endpoint.
+It auto-detects Ollama locally. Or log in to use Kognisant Cloud models (DeepSeek-V4, MiniMax-M3, Kimi, and more):
+
+```bash
+kognisant login
+```
+
+Use `/model` in chat to switch between any available model.
 
 ### 3. Let the agent handle complex work
 
@@ -213,7 +226,7 @@ $ kognisant channel list
 Every project gets a `.kognisant/context.md` file that the AI reads on startup and updates after significant work. Global skills in `~/.kognisant_core/skills/` carry knowledge across all projects. Teach it once, reuse forever.
 
 ### Multi-Model Support
-Ollama, llama.cpp, OpenAI, DeepSeek, Groq, NVidia, Kimi, Nebius, or any OpenAI-compatible endpoint. Switch mid-session with `/model`. The system tracks per-model reliability and auto-switches on failures.
+Kognisant Cloud provides instant access to premium models (DeepSeek-V4-Pro, MiniMax-M3, Kimi-K2.7-Code, and more) — just `kognisant login`. Also supports Ollama, llama.cpp, OpenAI, Anthropic, Groq, NVidia, Nebius, or any OpenAI-compatible endpoint. Switch mid-session with `/model`. The system tracks per-model reliability, auto-switches on failures, and falls back gracefully from cloud → external → local.
 
 ### Autonomous Agents
 The `/agent` command dispatches a multi-agent swarm that plans, executes in parallel, reflects on outcomes, and persists learnings. Complex tasks like "research X and write Y" are auto-detected and delegated to the swarm without manual intervention.
@@ -252,9 +265,11 @@ These are documented in detail in [`docs/`](docs/):
 ### CLI
 
 ```bash
+kognisant login             # Authenticate with Kognisant Cloud
+kognisant logout            # Clear cloud credentials
 kognisant init              # Initialize project memory
 kognisant chat              # Start interactive session
-kognisant setup             # Configure model providers
+kognisant setup             # Configure external model providers
 kognisant status            # Workspace health check
 kognisant spec <name>       # Feature specification workflow
 kognisant daemon start      # Start background daemon
@@ -295,6 +310,7 @@ kognisant channel list      # Show all channels with status
 cli-kognisant/
 ├── cli_kognisant/          # Source modules
 │   ├── main.py             # CLI entry point (argparse)
+│   ├── auth.py             # Authentication (Firebase + API key)
 │   ├── chat.py             # Interactive chat loop + slash commands
 │   ├── agents.py           # PERP swarm orchestration
 │   ├── channels.py         # Channel system (remote AI + SMM)
